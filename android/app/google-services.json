@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "497194386332",
+    "project_id": "schrodingerchess",
+    "storage_bucket": "schrodingerchess.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:497194386332:android:ea76df3877af64c25d3e59",
+        "android_client_info": {
+          "package_name": "com.example.schroedinger_chess"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "497194386332-cr1ht3cuclepgo1bs2mf29hcppvdvn0t.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.schroedinger_chess",
+            "certificate_hash": "9dfd07d4778c8571876bbd2dbda279bd75b66e1c"
+          }
+        },
+        {
+          "client_id": "497194386332-jthk8lmmajga02pkr2u8rav3vvpuen5n.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC8q2TIWSzoM-0aQuueF7ws3LObFuj-PWM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "497194386332-jthk8lmmajga02pkr2u8rav3vvpuen5n.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

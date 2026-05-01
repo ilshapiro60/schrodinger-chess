@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- White background -->
+  <rect width="512" height="512" fill="white"/>
+
+  <!-- Left ear -->
+  <polygon points="95,200 68,55 210,158" fill="black"/>
+  <!-- Right ear -->
+  <polygon points="417,200 444,55 302,158" fill="black"/>
+
+  <!-- Cat head -->
+  <circle cx="256" cy="295" r="172" fill="black"/>
+
+  <!-- Left eye white -->
+  <ellipse cx="192" cy="272" rx="36" ry="34" fill="white"/>
+  <!-- Left pupil (vertical slit) -->
+  <ellipse cx="192" cy="272" rx="13" ry="28" fill="black"/>
+  <!-- Left eye shine -->
+  <circle cx="202" cy="260" r="8" fill="white"/>
+
+  <!-- Right eye white -->
+  <ellipse cx="320" cy="272" rx="36" ry="34" fill="white"/>
+  <!-- Right pupil (vertical slit) -->
+  <ellipse cx="320" cy="272" rx="13" ry="28" fill="black"/>
+  <!-- Right eye shine -->
+  <circle cx="330" cy="260" r="8" fill="white"/>
+
+  <!-- Nose (small triangle) -->
+  <path d="M247,312 L256,300 L265,312 Q256,322 247,312 Z" fill="white"/>
+
+  <!-- Mouth -->
+  <path d="M256,322 Q240,340 224,333" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+  <path d="M256,322 Q272,340 288,333" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+
+  <!-- Whiskers left -->
+  <line x1="90" y1="312" x2="228" y2="320" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="85" y1="334" x2="228" y2="334" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="90" y1="356" x2="228" y2="348" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- Whiskers right -->
+  <line x1="422" y1="312" x2="284" y2="320" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="427" y1="334" x2="284" y2="334" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="422" y1="356" x2="284" y2="348" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+</svg>
