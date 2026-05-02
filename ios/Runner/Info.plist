@@ -5,6 +5,8 @@
 	<!-- AdMob App ID — replace with real ID from AdMob console once approved -->
 	<key>GADApplicationIdentifier</key>
 	<string>ca-app-pub-3940256099942544~1458002511</string>
+	<key>NSUserTrackingUsageDescription</key>
+	<string>This app uses ads to stay free. Allowing tracking helps show relevant ads.</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>
