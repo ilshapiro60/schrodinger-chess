@@ -9,6 +9,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:in_app_purchase/in_app_purchase.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'firebase_options.dart';
 
 // ── Ad unit IDs ──────────────────────────────────────────────────────────────
@@ -796,6 +798,10 @@ class _GameScreenState extends State<GameScreen> {
   User?       _currentUser;
   StreamSubscription<User?>? _authSub;
 
+  // Purchases
+  bool        _adsRemoved  = false;
+  StreamSubscription<List<PurchaseDetails>>? _purchaseSub;
+
   ChessTheme get _theme => kThemes[_themeIndex];
   bool get _vsAI     => _mode == GameMode.vsAI;
   bool get _isOnline => _mode == GameMode.online;
@@ -813,6 +819,76 @@ class _GameScreenState extends State<GameScreen> {
         if (mounted) setState(() => _currentUser = user);
       });
     }
+    _initPurchases();
+  }
+
+  Future<void> _initPurchases() async {
+    _adsRemoved = await _PurchaseService.loadAdsRemoved();
+    if (mounted) setState(() {});
+    _purchaseSub = InAppPurchase.instance.purchaseStream.listen(
+      _handlePurchaseUpdate,
+      onError: (_) {},
+    );
+  }
+
+  Future<void> _handlePurchaseUpdate(List<PurchaseDetails> purchases) async {
+    for (final p in purchases) {
+      if (p.status == PurchaseStatus.purchased || p.status == PurchaseStatus.restored) {
+        if (p.productID == _PurchaseService.productId) {
+          await _PurchaseService.setAdsRemoved();
+          if (mounted) setState(() => _adsRemoved = true);
+        }
+        await InAppPurchase.instance.completePurchase(p);
+      } else if (p.status == PurchaseStatus.error) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Purchase failed: ${p.error?.message ?? "Unknown error"}')));
+        }
+      }
+    }
+  }
+
+  Future<void> _purchaseRemoveAds() async {
+    final product = await _PurchaseService.getProduct();
+    if (!mounted) return;
+    if (product == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Purchase unavailable. Try again later.')));
+      return;
+    }
+    await _PurchaseService.buy(product);
+  }
+
+  void _showRemoveAdsDialog() {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Remove Ads'),
+        content: const Text(
+          'Purchase once to permanently remove all ads.\n\n'
+          'This supports the developer and keeps Schrödinger Chess free for everyone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _PurchaseService.restore();
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Restoring purchases…')));
+            },
+            child: const Text('Restore'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () { Navigator.pop(context); _purchaseRemoveAds(); },
+            child: const Text('Remove Ads — \$0.99'),
+          ),
+        ],
+      ),
+    );
   }
 
   // ── Blink ────────────────────────────────────────────────────────────────
@@ -836,6 +912,7 @@ class _GameScreenState extends State<GameScreen> {
     _blinkTimer?.cancel();
     _gameSub?.cancel();
     _authSub?.cancel();
+    _purchaseSub?.cancel();
     super.dispose();
   }
 
@@ -1363,6 +1440,12 @@ class _GameScreenState extends State<GameScreen> {
           ],
         ]),
         actions: [
+          if (!_adsRemoved)
+            IconButton(
+              icon: const Icon(Icons.block, size: 20),
+              tooltip: 'Remove Ads',
+              onPressed: _showRemoveAdsDialog,
+            ),
           if (_firebaseAvailable)
             IconButton(
               tooltip: _currentUser != null ? _currentUser!.displayName ?? 'Profile' : 'Sign In',
@@ -1389,7 +1472,7 @@ class _GameScreenState extends State<GameScreen> {
         ],
       ),
       body: Column(children: [
-        const _BannerAdWidget(),
+        if (!_adsRemoved) const _BannerAdWidget(),
         _StatusBar(
           game:               _game,
           theme:              t,
@@ -1464,6 +1547,37 @@ class _GameScreenState extends State<GameScreen> {
       ]),
     );
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// In-app purchase  (Remove Ads — $0.99 non-consumable)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class _PurchaseService {
+  static const productId = 'com.pryroinc.schrodingerchess.removeads';
+  static const _prefKey  = 'ads_removed';
+  static final  _iap     = InAppPurchase.instance;
+
+  static Future<bool> loadAdsRemoved() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_prefKey) ?? false;
+  }
+
+  static Future<void> setAdsRemoved() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_prefKey, true);
+  }
+
+  static Future<ProductDetails?> getProduct() async {
+    if (!await _iap.isAvailable()) return null;
+    final response = await _iap.queryProductDetails({productId});
+    return response.productDetails.isEmpty ? null : response.productDetails.first;
+  }
+
+  static Future<void> buy(ProductDetails product) =>
+      _iap.buyNonConsumable(purchaseParam: PurchaseParam(productDetails: product));
+
+  static Future<void> restore() => _iap.restorePurchases();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
