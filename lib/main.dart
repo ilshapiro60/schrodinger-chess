@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:isolate';
 import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -6,14 +7,22 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'firebase_options.dart';
+
+// ── Ad unit IDs ──────────────────────────────────────────────────────────────
+// TODO: replace both values with real AdMob IDs once the app is approved
+const _kBannerIdAndroid = 'ca-app-pub-3940256099942544/6300978111'; // test
+const _kBannerIdIos     = 'ca-app-pub-3940256099942544/2934735716'; // test
+String get _bannerAdUnitId => Platform.isIOS ? _kBannerIdIos : _kBannerIdAndroid;
 
 // Whether Firebase was successfully initialised at startup.
 bool _firebaseAvailable = false;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await MobileAds.instance.initialize();
   try {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
@@ -170,6 +179,8 @@ enum PieceColor { white, black }
 enum GamePhase  { move, shift, gameOver }
 enum GameMode   { twoPlayer, vsAI, online }
 
+typedef _GameConfig = ({GameMode mode, int boardCount});
+
 class Piece {
   final PieceType  type;
   final PieceColor color;
@@ -203,19 +214,28 @@ class Pos {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class Game {
-  final List<List<List<Piece?>>> boards = List.generate(
-    3, (_) => List.generate(8, (_) => List<Piece?>.filled(8, null)),
-  );
+  final int boardCount;
+  late final List<List<List<Piece?>>> boards;
 
   PieceColor currentPlayer = PieceColor.white;
   GamePhase  phase         = GamePhase.move;
   int?       _lastMoveLevel;
 
-  Game() { _init(); }
-  Game._empty();
+  Game({this.boardCount = 3}) {
+    boards = List.generate(
+      boardCount, (_) => List.generate(8, (_) => List<Piece?>.filled(8, null)),
+    );
+    _init();
+  }
+
+  Game._empty({this.boardCount = 3}) {
+    boards = List.generate(
+      boardCount, (_) => List.generate(8, (_) => List<Piece?>.filled(8, null)),
+    );
+  }
 
   void _init() {
-    for (int l = 0; l < 3; l++) {
+    for (int l = 0; l < boardCount; l++) {
       final b = boards[l];
       b[0] = _backRank(PieceColor.black);
       for (int c = 0; c < 8; c++) { b[1][c] = Piece(PieceType.pawn, PieceColor.black); }
@@ -233,8 +253,8 @@ class Game {
   ];
 
   Game clone() {
-    final g = Game._empty();
-    for (int l = 0; l < 3; l++) {
+    final g = Game._empty(boardCount: boardCount);
+    for (int l = 0; l < boardCount; l++) {
       for (int r = 0; r < 8; r++) {
         for (int c = 0; c < 8; c++) {
           g.boards[l][r][c] = boards[l][r][c];
@@ -252,8 +272,9 @@ class Game {
   // Boards stored as 3 flat 128-char strings (64 squares × 2 chars each).
   // Firestore does not support nested arrays.
   Map<String, dynamic> toMap() => {
-    'boards': List.generate(3, (l) => List.generate(64, (i) =>
+    'boards': List.generate(boardCount, (l) => List.generate(64, (i) =>
         _encodePiece(boards[l][i ~/ 8][i % 8])).join()),
+    'boardCount': boardCount,
     'currentPlayer': currentPlayer == PieceColor.white ? 'white' : 'black',
     'phase': phase.name,
     'lastMoveLevel': _lastMoveLevel ?? -1,
@@ -261,7 +282,7 @@ class Game {
 
   void applyMap(Map<String, dynamic> d) {
     final rawBoards = d['boards'] as List<dynamic>;
-    for (int l = 0; l < 3; l++) {
+    for (int l = 0; l < boardCount; l++) {
       final s = rawBoards[l] as String;
       for (int i = 0; i < 64; i++) {
         boards[l][i ~/ 8][i % 8] = _decodePiece(s.substring(i * 2, i * 2 + 2));
@@ -311,7 +332,7 @@ class Game {
 
   int _countKings(PieceColor color) {
     int n = 0;
-    for (int l = 0; l < 3; l++) {
+    for (int l = 0; l < boardCount; l++) {
       for (int r = 0; r < 8; r++) {
         for (int c = 0; c < 8; c++) {
           final p = boards[l][r][c];
@@ -322,8 +343,8 @@ class Game {
     return n;
   }
 
-  int get whiteKingsCaptured => 3 - _countKings(PieceColor.black);
-  int get blackKingsCaptured => 3 - _countKings(PieceColor.white);
+  int get whiteKingsCaptured => boardCount - _countKings(PieceColor.black);
+  int get blackKingsCaptured => boardCount - _countKings(PieceColor.white);
 
   static const _boardNames = ['Board 1', 'Board 2', 'Board 3'];
 
@@ -420,8 +441,8 @@ class Game {
     return true;
   }
 
-  static int _shiftUp(int l)   => (l + 1) % 3;
-  static int _shiftDown(int l) => (l + 2) % 3;
+  int _shiftUp(int l)   => (l + 1) % boardCount;
+  int _shiftDown(int l) => (l - 1 + boardCount) % boardCount;
 
   List<Pos> shiftablePieces() {
     if (phase != GamePhase.shift || _lastMoveLevel == null) return const [];
@@ -443,17 +464,17 @@ class Game {
 
   List<int> shiftTargets(int l, int r, int c) {
     if (phase != GamePhase.shift || l != _lastMoveLevel) return const [];
-    final t = <int>[];
-    if (boards[_shiftUp(l)][r][c]   == null) { t.add(_shiftUp(l)); }
-    if (boards[_shiftDown(l)][r][c] == null) { t.add(_shiftDown(l)); }
-    return t;
+    final seen = <int>{};
+    if (boards[_shiftUp(l)][r][c]   == null) seen.add(_shiftUp(l));
+    if (boards[_shiftDown(l)][r][c] == null) seen.add(_shiftDown(l));
+    return seen.toList();
   }
 
   bool executeShift(int fl, int r, int c, int tl) {
     if (phase != GamePhase.shift || fl != _lastMoveLevel) return false;
     final p = boards[fl][r][c];
     if (p == null || p.color != currentPlayer || p.type == PieceType.king) return false;
-    if (tl < 0 || tl > 2 || boards[tl][r][c] != null) return false;
+    if (tl < 0 || tl >= boardCount || boards[tl][r][c] != null) return false;
     boards[fl][r][c] = null;
     boards[tl][r][c] = p;
     _endTurn();
@@ -470,7 +491,7 @@ class Game {
   }
 
   void _checkWin() {
-    if (whiteKingsCaptured == 3 || blackKingsCaptured == 3) {
+    if (whiteKingsCaptured == boardCount || blackKingsCaptured == boardCount) {
       phase = GamePhase.gameOver;
     }
   }
@@ -551,7 +572,7 @@ class _ChessAI {
 
   static List<_AiTurn> _generateTurns(Game g) {
     final turns = <_AiTurn>[];
-    for (int l = 0; l < 3; l++) {
+    for (int l = 0; l < g.boardCount; l++) {
       for (int fr = 0; fr < 8; fr++) {
         for (int fc = 0; fc < 8; fc++) {
           if (!g.isOwnPiece(l, fr, fc)) continue;
@@ -586,7 +607,7 @@ class _ChessAI {
 
   static int _evaluate(Game g) {
     int score = 0;
-    for (int l = 0; l < 3; l++) {
+    for (int l = 0; l < g.boardCount; l++) {
       for (int r = 0; r < 8; r++) {
         for (int c = 0; c < 8; c++) {
           final p = g.boards[l][r][c];
@@ -631,10 +652,10 @@ class _OnlineService {
         rand.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
   }
 
-  static Future<({String code, String token})> createGame({String? uid}) async {
+  static Future<({String code, String token})> createGame({String? uid, int boardCount = 3}) async {
     final code  = _makeCode();
     final token = _makeToken();
-    final g     = Game();
+    final g     = Game(boardCount: boardCount);
     await _db.collection(_col).doc(code).set({
       ...g.toMap(),
       'status':     'waiting',
@@ -779,7 +800,9 @@ class _GameScreenState extends State<GameScreen> {
   bool get _vsAI     => _mode == GameMode.vsAI;
   bool get _isOnline => _mode == GameMode.online;
 
-  static const _labels = ['Board 1 · Bottom', 'Board 2 · Middle', 'Board 3 · Top'];
+  List<String> get _labels => _game.boardCount == 2
+      ? ['Board 1 · Bottom', 'Board 2 · Top']
+      : ['Board 1 · Bottom', 'Board 2 · Middle', 'Board 3 · Top'];
 
   @override
   void initState() {
@@ -930,18 +953,19 @@ class _GameScreenState extends State<GameScreen> {
     }
   }
 
-  Future<void> _createGame() async {
+  Future<void> _createGame({int boardCount = 3}) async {
     try {
-      final result = await _OnlineService.createGame(uid: _currentUser?.uid);
+      final result = await _OnlineService.createGame(uid: _currentUser?.uid, boardCount: boardCount);
       if (!mounted) return;
       _blinkTimer?.cancel();
       _gameSub?.cancel();
       setState(() {
         _mode               = GameMode.online;
+
         _onlineCode         = result.code;
         _myColor            = PieceColor.white;
         _waitingForOpponent = true;
-        _game               = Game();
+        _game               = Game(boardCount: boardCount);
         _selected           = null;
         _blinkPos           = null;
         _blinkVisible       = true;
@@ -969,12 +993,13 @@ class _GameScreenState extends State<GameScreen> {
 
     _blinkTimer?.cancel();
     _gameSub?.cancel();
+    final bc = (data['boardCount'] as int?) ?? 3;
     setState(() {
       _mode               = GameMode.online;
       _onlineCode         = upper;
       _myColor            = PieceColor.black;
       _waitingForOpponent = false;
-      _game               = Game()..applyMap(data);
+      _game               = Game(boardCount: bc)..applyMap(data);
       _selected           = null;
       _blinkPos           = null;
       _blinkVisible       = true;
@@ -1072,8 +1097,8 @@ class _GameScreenState extends State<GameScreen> {
             mainAxisSize: MainAxisSize.min,
             children: targets.map((t) => ListTile(
               leading: Icon(
-                  Game._shiftUp(l) == t ? Icons.arrow_upward : Icons.arrow_downward),
-              title: Text('${Game._shiftUp(l) == t ? "Up" : "Down"} → ${_labels[t]}'),
+                  _game._shiftUp(l) == t ? Icons.arrow_upward : Icons.arrow_downward),
+              title: Text('${_game._shiftUp(l) == t ? "Up" : "Down"} → ${_labels[t]}'),
               onTap: () => Navigator.pop(context, t),
             )).toList(),
           ),
@@ -1095,12 +1120,24 @@ class _GameScreenState extends State<GameScreen> {
   // ── New game ──────────────────────────────────────────────────────────────
   void _newGame() {
     GameMode mode = _mode == GameMode.online ? GameMode.twoPlayer : _mode;
-    showDialog<GameMode>(
+    int boardCount = _game.boardCount;
+    showDialog<_GameConfig>(
       context: context,
       builder: (_) => StatefulBuilder(
         builder: (ctx, setLocal) => AlertDialog(
           title: const Text('New game'),
           content: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('Boards', style: TextStyle(color: Colors.white70)),
+            const SizedBox(height: 10),
+            SegmentedButton<int>(
+              segments: const [
+                ButtonSegment(value: 2, label: Text('2 Boards'), icon: Icon(Icons.layers)),
+                ButtonSegment(value: 3, label: Text('3 Boards'), icon: Icon(Icons.stacked_bar_chart)),
+              ],
+              selected: {boardCount},
+              onSelectionChanged: (s) => setLocal(() => boardCount = s.first),
+            ),
+            const SizedBox(height: 16),
             const Text('Opponent', style: TextStyle(color: Colors.white70)),
             const SizedBox(height: 14),
             SegmentedButton<GameMode>(
@@ -1143,7 +1180,7 @@ class _GameScreenState extends State<GameScreen> {
                 style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(44)),
                 onPressed: () {
                   Navigator.pop(ctx);
-                  _createGame();
+                  _createGame(boardCount: boardCount);
                 },
               ),
               const SizedBox(height: 8),
@@ -1166,7 +1203,7 @@ class _GameScreenState extends State<GameScreen> {
             TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
             if (mode != GameMode.online)
               FilledButton(
-                onPressed: () => Navigator.pop(ctx, mode),
+                onPressed: () => Navigator.pop(ctx, (mode: mode, boardCount: boardCount)),
                 child: const Text('Start'),
               ),
           ],
@@ -1177,13 +1214,14 @@ class _GameScreenState extends State<GameScreen> {
         _blinkTimer?.cancel();
         _gameSub?.cancel();
         setState(() {
-          _mode               = result;
+          _mode               = result.mode;
+
           _onlineCode         = null;
           _myColor            = null;
           _waitingForOpponent = false;
           _resultRecorded     = false;
           _aiThinking         = false;
-          _game               = Game();
+          _game               = Game(boardCount: result.boardCount);
           _selected           = null;
           _blinkPos           = null;
           _blinkVisible       = true;
@@ -1351,6 +1389,7 @@ class _GameScreenState extends State<GameScreen> {
         ],
       ),
       body: Column(children: [
+        const _BannerAdWidget(),
         _StatusBar(
           game:               _game,
           theme:              t,
@@ -1411,7 +1450,7 @@ class _GameScreenState extends State<GameScreen> {
           child: SingleChildScrollView(
             padding: const EdgeInsets.symmetric(vertical: 8),
             child: Column(children: [
-              for (int lvl = 2; lvl >= 0; lvl--)
+              for (int lvl = _game.boardCount - 1; lvl >= 0; lvl--)
                 _BoardSection(
                   level: lvl, label: _labels[lvl], game: _game,
                   theme: t, selected: _selected,
@@ -1423,6 +1462,61 @@ class _GameScreenState extends State<GameScreen> {
           ),
         ),
       ]),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Banner ad
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class _BannerAdWidget extends StatefulWidget {
+  const _BannerAdWidget();
+  @override
+  State<_BannerAdWidget> createState() => _BannerAdWidgetState();
+}
+
+class _BannerAdWidgetState extends State<_BannerAdWidget> {
+  BannerAd? _ad;
+  bool _loaded = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_ad == null) _loadAd();
+  }
+
+  Future<void> _loadAd() async {
+    final width = MediaQuery.of(context).size.width.truncate();
+    final size  = await AdSize.getCurrentOrientationAnchoredAdaptiveBannerAdSize(width);
+    if (size == null || !mounted) return;
+    final ad = BannerAd(
+      adUnitId: _bannerAdUnitId,
+      size: size,
+      request: const AdRequest(),
+      listener: BannerAdListener(
+        onAdLoaded: (_) { if (mounted) setState(() => _loaded = true); },
+        onAdFailedToLoad: (ad, _) => ad.dispose(),
+      ),
+    );
+    await ad.load();
+    if (!mounted) { ad.dispose(); return; }
+    setState(() => _ad = ad);
+  }
+
+  @override
+  void dispose() {
+    _ad?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_loaded || _ad == null) return const SizedBox.shrink();
+    return SizedBox(
+      width:  _ad!.size.width.toDouble(),
+      height: _ad!.size.height.toDouble(),
+      child:  AdWidget(ad: _ad!),
     );
   }
 }
@@ -1597,9 +1691,9 @@ class _RulesScreen extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(20, 20, 20, 40),
         children: [
           _RuleSection(theme: t, icon: '♟', title: 'Overview', body:
-            'Schrödinger Chess is played on 3 stacked 8×8 boards. '
+            'Schrödinger Chess is played on 2 or 3 stacked 8×8 boards (choose when starting a new game). '
             'Each board starts with a full standard chess setup for both sides. '
-            'The goal is to capture all three of your opponent\'s kings before they capture yours.'),
+            'The goal is to capture all of your opponent\'s kings before they capture yours.'),
 
           _RuleSection(theme: t, icon: '🔢', title: 'Turn Structure',
             body: 'Every turn has two phases:\n\n'
