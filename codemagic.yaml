@@ -1,6 +1,11 @@
 # Codemagic uses this file when it exists on the checked-out branch (Workflow Editor is ignored).
-# App Store Connect API key is loaded from the 'appstore_credentials' env-var group
-# (set in Codemagic → schrodinger-chess → Environment variables).
+#
+# Code signing: Team → Environment variable group `appstore_credentials` must include:
+#   APP_STORE_CONNECT_PRIVATE_KEY, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID
+# If `fetch-signing-files --create` fails to create a certificate, add CERTIFICATE_PRIVATE_KEY
+# (distribution cert RSA key) — see https://docs.codemagic.io/yaml-code-signing/alternative-code-signing-methods/
+#
+# Publishing: same API key vars work for App Store Connect upload.
 
 workflows:
   ios-release:
@@ -10,14 +15,22 @@ workflows:
     environment:
       groups:
         - appstore_credentials
-      ios_signing:
-        distribution_type: app_store
-        bundle_identifier: com.pryroinc.schrodingerchess
+      vars:
+        BUNDLE_ID: com.pryroinc.schrodingerchess
       flutter: stable
       xcode: latest
       cocoapods: default
     scripts:
-      - name: Set up code signing for Xcode
+      - name: Initialize keychain for code signing
+        script: keychain initialize
+      - name: Fetch / create App Store signing cert and provisioning profile
+        script: |
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --create
+      - name: Add certificates to keychain
+        script: keychain add-certificates
+      - name: Apply provisioning profiles to Xcode project
         script: xcode-project use-profiles
       - name: Flutter pub get
         script: flutter pub get
