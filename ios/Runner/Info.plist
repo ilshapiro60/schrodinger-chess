@@ -5,6 +5,19 @@
 	<!-- AdMob App ID — replace with real ID from AdMob console once approved -->
 	<key>GADApplicationIdentifier</key>
 	<string>ca-app-pub-3940256099942544~1458002511</string>
+	<key>GIDClientID</key>
+	<string>497194386332-k89dauu7fs5laalqa37uh5mb6bpuq7o9.apps.googleusercontent.com</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.497194386332-k89dauu7fs5laalqa37uh5mb6bpuq7o9</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSUserTrackingUsageDescription</key>
 	<string>This app uses ads to stay free. Allowing tracking helps show relevant ads.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>

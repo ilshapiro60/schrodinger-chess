@@ -1,16 +1,21 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math';
+import 'package:app_tracking_transparency/app_tracking_transparency.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:crypto/crypto.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:in_app_purchase/in_app_purchase.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import 'firebase_options.dart';
 
 // ── Ad unit IDs ──────────────────────────────────────────────────────────────
@@ -22,8 +27,22 @@ String get _bannerAdUnitId => Platform.isIOS ? _kBannerIdIos : _kBannerIdAndroid
 // Whether Firebase was successfully initialised at startup.
 bool _firebaseAvailable = false;
 
+Future<void> _requestTrackingConsentIfNeeded() async {
+  if (kIsWeb || !Platform.isIOS) return;
+  try {
+    final status = await AppTrackingTransparency.trackingAuthorizationStatus;
+    if (status == TrackingStatus.notDetermined) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      await AppTrackingTransparency.requestTrackingAuthorization();
+    }
+  } catch (_) {
+    /* Avoid blocking startup if ATT APIs fail unexpectedly. */
+  }
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await _requestTrackingConsentIfNeeded();
   await MobileAds.instance.initialize();
   try {
     await Firebase.initializeApp(
@@ -711,29 +730,102 @@ class _OnlineService {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class _AuthService {
-  static final _auth   = FirebaseAuth.instance;
-  static final _google = GoogleSignIn();
-  static final _db     = FirebaseFirestore.instance;
+  static final _auth = FirebaseAuth.instance;
+  static final _db = FirebaseFirestore.instance;
+  static GoogleSignIn? _google;
+
+  static bool get _supportsAppleAuth =>
+      !kIsWeb && (Platform.isIOS || Platform.isMacOS);
+
+  static GoogleSignIn _googleSignIn() =>
+      _google ??= GoogleSignIn(
+        scopes: const ['email', 'https://www.googleapis.com/auth/userinfo.profile'],
+        clientId: !kIsWeb && Platform.isIOS
+            ? DefaultFirebaseOptions.ios.iosClientId
+            : null,
+      );
 
   static User? get currentUser => _auth.currentUser;
   static Stream<User?> get authChanges => _auth.authStateChanges();
 
   static Future<User?> signInWithGoogle() async {
-    final googleUser = await _google.signIn();
+    final googleUser = await _googleSignIn().signIn();
     if (googleUser == null) return null;
     final googleAuth = await googleUser.authentication;
+    if (googleAuth.idToken == null) {
+      await _googleSignIn().signOut();
+      throw FirebaseAuthException(
+        code: 'missing-id-token',
+        message: 'Google Sign-In returned no ID token. Check Firebase iOS bundle ID '
+            'matches the App Store id (${DefaultFirebaseOptions.ios.iosBundleId}).',
+      );
+    }
     final credential = GoogleAuthProvider.credential(
       accessToken: googleAuth.accessToken,
-      idToken:     googleAuth.idToken,
+      idToken: googleAuth.idToken,
     );
     final result = await _auth.signInWithCredential(credential);
     await _upsertProfile(result.user!);
     return result.user;
   }
 
+  static Future<User?> signInWithApple() async {
+    if (!_supportsAppleAuth) return null;
+
+    final rawNonce = _randomNonceString();
+    final nonce = _sha256ofString(rawNonce);
+    final appleCredential = await SignInWithApple.getAppleIDCredential(
+      scopes: const [
+        AppleIDAuthorizationScopes.email,
+        AppleIDAuthorizationScopes.fullName,
+      ],
+      nonce: nonce,
+    );
+    final idToken = appleCredential.identityToken;
+    if (idToken == null) {
+      throw FirebaseAuthException(
+        code: 'missing-apple-id-token',
+        message: 'Sign in with Apple did not return an identity token.',
+      );
+    }
+    final oauthCredential = OAuthProvider('apple.com').credential(
+      idToken: idToken,
+      rawNonce: rawNonce,
+    );
+    final result = await _auth.signInWithCredential(oauthCredential);
+    final user = result.user!;
+
+    final builtName = [
+      appleCredential.givenName,
+      appleCredential.familyName,
+    ].whereType<String>().where((s) => s.isNotEmpty).join(' ');
+    final fromApple = builtName.trim();
+    if (fromApple.isNotEmpty &&
+        (user.displayName == null || user.displayName!.trim().isEmpty)) {
+      await user.updateDisplayName(fromApple);
+      await user.reload();
+    }
+
+    await _upsertProfile(_auth.currentUser!);
+    return _auth.currentUser;
+  }
+
   static Future<void> signOut() async {
-    await _google.signOut();
+    await _google?.signOut();
     await _auth.signOut();
+  }
+
+  static String _randomNonceString([int length = 32]) {
+    const charset =
+        '0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._';
+    final random = Random.secure();
+    return List.generate(length, (_) => charset[random.nextInt(charset.length)])
+        .join();
+  }
+
+  static String _sha256ofString(String input) {
+    final bytes = utf8.encode(input);
+    return sha256.convert(bytes).toString();
   }
 
   static Future<void> _upsertProfile(User user) async {
@@ -827,13 +919,19 @@ class _GameScreenState extends State<GameScreen> {
     if (mounted) setState(() {});
     _purchaseSub = InAppPurchase.instance.purchaseStream.listen(
       _handlePurchaseUpdate,
-      onError: (_) {},
+      onError: (Object error, _) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('StoreKit error: $error')),
+        );
+      },
     );
   }
 
   Future<void> _handlePurchaseUpdate(List<PurchaseDetails> purchases) async {
     for (final p in purchases) {
-      if (p.status == PurchaseStatus.purchased || p.status == PurchaseStatus.restored) {
+      if (p.status == PurchaseStatus.purchased ||
+          p.status == PurchaseStatus.restored) {
         if (p.productID == _PurchaseService.productId) {
           await _PurchaseService.setAdsRemoved();
           if (mounted) setState(() => _adsRemoved = true);
@@ -842,7 +940,19 @@ class _GameScreenState extends State<GameScreen> {
       } else if (p.status == PurchaseStatus.error) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Purchase failed: ${p.error?.message ?? "Unknown error"}')));
+            SnackBar(
+              content: Text(
+                'Purchase failed: '
+                '${p.error?.message ?? p.error?.code ?? "Unknown error"}',
+              ),
+            ),
+          );
+        }
+      } else if (p.status == PurchaseStatus.pending) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Purchase pending approval…')),
+          );
         }
       }
     }
@@ -852,11 +962,30 @@ class _GameScreenState extends State<GameScreen> {
     final product = await _PurchaseService.getProduct();
     if (!mounted) return;
     if (product == null) {
+      final note = _PurchaseService.lastProductLookupNote ??
+          'ensure the Remove Ads IAP is Ready to Submit / Approved in App Store Connect';
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Purchase unavailable. Try again later.')));
+        SnackBar(content: Text('Purchase unavailable: $note.')),
+      );
       return;
     }
-    await _PurchaseService.buy(product);
+    try {
+      final started = await _PurchaseService.buy(product);
+      if (!mounted) return;
+      if (!started) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(_PurchaseService.lastPurchaseError ??
+                'Purchase could not be started.'),
+          ),
+        );
+      }
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Purchase error: ${e.message ?? e.code}')),
+      );
+    }
   }
 
   void _showRemoveAdsDialog() {
@@ -958,7 +1087,7 @@ class _GameScreenState extends State<GameScreen> {
         theme: _theme,
         user: _currentUser,
         firebaseAvailable: _firebaseAvailable,
-        onSignIn: () async {
+        onSignInWithGoogle: () async {
           Navigator.pop(context);
           try {
             await _AuthService.signInWithGoogle();
@@ -969,6 +1098,19 @@ class _GameScreenState extends State<GameScreen> {
             }
           }
         },
+        onSignInWithApple: (!kIsWeb && Platform.isIOS)
+            ? () async {
+                Navigator.pop(context);
+                try {
+                  await _AuthService.signInWithApple();
+                } catch (e) {
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Sign-in failed: $e')));
+                  }
+                }
+              }
+            : null,
         onSignOut: () async {
           Navigator.pop(context);
           await _AuthService.signOut();
@@ -1554,9 +1696,14 @@ class _GameScreenState extends State<GameScreen> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class _PurchaseService {
-  static const productId = 'com.pryroinc.schrodingerchess.removeads';
+  static const productId = 'com.pryroinc.schrodingerchess.removead';
   static const _prefKey  = 'ads_removed';
   static final  _iap     = InAppPurchase.instance;
+
+  /// Explanation for debugging when `getProduct` returns null.
+  static String? lastProductLookupNote;
+  /// Set when `buy` returns false or throws internally.
+  static String? lastPurchaseError;
 
   static Future<bool> loadAdsRemoved() async {
     final prefs = await SharedPreferences.getInstance();
@@ -1569,13 +1716,39 @@ class _PurchaseService {
   }
 
   static Future<ProductDetails?> getProduct() async {
-    if (!await _iap.isAvailable()) return null;
+    lastProductLookupNote = null;
+    if (!await _iap.isAvailable()) {
+      lastProductLookupNote = 'in-app purchases are not available on this device';
+      return null;
+    }
     final response = await _iap.queryProductDetails({productId});
-    return response.productDetails.isEmpty ? null : response.productDetails.first;
+    if (response.productDetails.isNotEmpty) {
+      return response.productDetails.first;
+    }
+    if (response.notFoundIDs.isNotEmpty) {
+      lastProductLookupNote =
+          'products not loaded from App Store (${response.notFoundIDs.join(', ')})';
+      return null;
+    }
+    if (response.error != null) {
+      lastProductLookupNote = response.error!.message;
+      return null;
+    }
+    lastProductLookupNote = 'product query returned empty with no diagnostics';
+    return null;
   }
 
-  static Future<void> buy(ProductDetails product) =>
-      _iap.buyNonConsumable(purchaseParam: PurchaseParam(productDetails: product));
+  static Future<bool> buy(ProductDetails product) async {
+    lastPurchaseError = null;
+    try {
+      return await _iap.buyNonConsumable(
+        purchaseParam: PurchaseParam(productDetails: product),
+      );
+    } on PlatformException catch (e) {
+      lastPurchaseError = e.message ?? e.code;
+      return false;
+    }
+  }
 
   static Future<void> restore() => _iap.restorePurchases();
 }
@@ -1640,15 +1813,19 @@ class _BannerAdWidgetState extends State<_BannerAdWidget> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class _ProfileSheet extends StatefulWidget {
-  final ChessTheme  theme;
-  final User?       user;
-  final bool        firebaseAvailable;
-  final VoidCallback onSignIn;
+  final ChessTheme theme;
+  final User? user;
+  final bool firebaseAvailable;
+  final Future<void> Function() onSignInWithGoogle;
+  final Future<void> Function()? onSignInWithApple;
   final VoidCallback onSignOut;
   const _ProfileSheet({
-    required this.theme, required this.user,
+    required this.theme,
+    required this.user,
     required this.firebaseAvailable,
-    required this.onSignIn, required this.onSignOut,
+    required this.onSignInWithGoogle,
+    this.onSignInWithApple,
+    required this.onSignOut,
   });
   @override
   State<_ProfileSheet> createState() => _ProfileSheetState();
@@ -1696,7 +1873,19 @@ class _ProfileSheetState extends State<_ProfileSheet> {
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.white54, fontSize: 13)),
           const SizedBox(height: 24),
-          if (widget.firebaseAvailable)
+          if (widget.firebaseAvailable) ...[
+            if (widget.onSignInWithApple != null) ...[
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: SignInWithAppleButton(
+                  onPressed: () => widget.onSignInWithApple!(),
+                  style: SignInWithAppleButtonStyle.black,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
@@ -1708,10 +1897,11 @@ class _ProfileSheetState extends State<_ProfileSheet> {
                   side: const BorderSide(color: Colors.white30),
                   padding: const EdgeInsets.symmetric(vertical: 14),
                 ),
-                onPressed: widget.onSignIn,
+                onPressed: () => widget.onSignInWithGoogle(),
               ),
-            )
-          else
+            ),
+          ],
+          if (!widget.firebaseAvailable)
             const Text('Firebase not configured — online features unavailable.',
                 textAlign: TextAlign.center,
                 style: TextStyle(color: Colors.white38, fontSize: 12)),

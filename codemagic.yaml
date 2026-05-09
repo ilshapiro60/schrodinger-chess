@@ -1,0 +1,33 @@
+# Codemagic uses this file when it exists on the checked-out branch (Workflow Editor is ignored).
+# Set integrations.app_store_connect to the exact name of your App Store Connect API key in:
+# Codemagic → Teams → Personal Account → Integrations (often "codemagic" or a custom name).
+
+workflows:
+  ios-release:
+    name: iOS Release
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+    integrations:
+      app_store_connect: codemagic
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.pryroinc.schrodingerchess
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Set up code signing for Xcode
+        script: xcode-project use-profiles
+      - name: Flutter pub get
+        script: flutter pub get
+      - name: CocoaPods
+        script: cd ios && pod install
+      - name: Build IPA (CFBundleVersion from pubspec +N)
+        script: bash scripts/flutter_build_ipa.sh
+    artifacts:
+      - build/ios/ipa/*.ipa
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: false

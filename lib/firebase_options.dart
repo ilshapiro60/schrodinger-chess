@@ -66,7 +66,7 @@ class DefaultFirebaseOptions {
     storageBucket: 'schrodingerchess.firebasestorage.app',
     androidClientId: '497194386332-cr1ht3cuclepgo1bs2mf29hcppvdvn0t.apps.googleusercontent.com',
     iosClientId: '497194386332-k89dauu7fs5laalqa37uh5mb6bpuq7o9.apps.googleusercontent.com',
-    iosBundleId: 'com.example.schroedingerChess',
+    iosBundleId: 'com.pryroinc.schrodingerchess',
   );
 
   static const FirebaseOptions macos = FirebaseOptions(
@@ -77,7 +77,7 @@ class DefaultFirebaseOptions {
     storageBucket: 'schrodingerchess.firebasestorage.app',
     androidClientId: '497194386332-cr1ht3cuclepgo1bs2mf29hcppvdvn0t.apps.googleusercontent.com',
     iosClientId: '497194386332-k89dauu7fs5laalqa37uh5mb6bpuq7o9.apps.googleusercontent.com',
-    iosBundleId: 'com.example.schroedingerChess',
+    iosBundleId: 'com.pryroinc.schrodingerchess',
   );
 
   static const FirebaseOptions windows = FirebaseOptions(
