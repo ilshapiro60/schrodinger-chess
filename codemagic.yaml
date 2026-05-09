@@ -1,15 +1,15 @@
 # Codemagic uses this file when it exists on the checked-out branch (Workflow Editor is ignored).
-# Set integrations.app_store_connect to the exact name of your App Store Connect API key in:
-# Codemagic → Teams → Personal Account → Integrations (often "codemagic" or a custom name).
+# App Store Connect API key is loaded from the 'appstore_credentials' env-var group
+# (set in Codemagic → schrodinger-chess → Environment variables).
 
 workflows:
   ios-release:
     name: iOS Release
     max_build_duration: 120
     instance_type: mac_mini_m2
-    integrations:
-      app_store_connect: codemagic
     environment:
+      groups:
+        - appstore_credentials
       ios_signing:
         distribution_type: app_store
         bundle_identifier: com.pryroinc.schrodingerchess
@@ -29,5 +29,7 @@ workflows:
       - build/ios/ipa/*.ipa
     publishing:
       app_store_connect:
-        auth: integration
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
         submit_to_testflight: false
