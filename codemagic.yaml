@@ -1,11 +1,20 @@
-# Codemagic uses this file when it exists on the checked-out branch (Workflow Editor is ignored).
+# Codemagic YAML (Workflow Editor is ignored when this file is on the branch.)
 #
-# Code signing: Team → Environment variable group `appstore_credentials` must include:
-#   APP_STORE_CONNECT_PRIVATE_KEY, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID
-# If `fetch-signing-files --create` fails to create a certificate, add CERTIFICATE_PRIVATE_KEY
-# (distribution cert RSA key) — see https://docs.codemagic.io/yaml-code-signing/alternative-code-signing-methods/
+# ── iOS signing (stable path): one-time setup in Codemagic, then simple builds ──
 #
-# Publishing: same API key vars work for App Store Connect upload.
+# 1. Codemagic → Team settings → Integrations → Developer Portal (App Store Connect API key).
+#    Same API key style as publishing (App Manager access is OK).
+#
+# 2. Codemagic → Team settings → codemagic.yaml settings → Code signing identities
+#    • iOS certificates → Fetch certificate OR upload Apple Distribution .p12
+#    • iOS provisioning profiles → Fetch profiles → App Store profile for
+#      com.pryroinc.schrodingerchess
+#
+# This workflow matches those stored files to the bundle id (no CLI --create,
+# no CERTIFICATE_PRIVATE_KEY).
+#
+# Publishing: env group appstore_credentials needs APP_STORE_CONNECT_PRIVATE_KEY,
+# APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_ISSUER_ID
 
 workflows:
   ios-release:
@@ -15,28 +24,20 @@ workflows:
     environment:
       groups:
         - appstore_credentials
-      vars:
-        BUNDLE_ID: com.pryroinc.schrodingerchess
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.pryroinc.schrodingerchess
       flutter: stable
       xcode: latest
       cocoapods: default
     scripts:
-      - name: Initialize keychain for code signing
-        script: keychain initialize
-      - name: Fetch / create App Store signing cert and provisioning profile
-        script: |
-          app-store-connect fetch-signing-files "$BUNDLE_ID" \
-            --type IOS_APP_STORE \
-            --create
-      - name: Add certificates to keychain
-        script: keychain add-certificates
-      - name: Apply provisioning profiles to Xcode project
+      - name: Apply code signing to Xcode (Team Code signing identities)
         script: xcode-project use-profiles
       - name: Flutter pub get
         script: flutter pub get
       - name: CocoaPods
         script: cd ios && pod install
-      - name: Build IPA (CFBundleVersion from pubspec +N)
+      - name: Build IPA (CFBundleVersion from pubspec)
         script: bash scripts/flutter_build_ipa.sh
     artifacts:
       - build/ios/ipa/*.ipa
