@@ -743,6 +743,7 @@ class _AuthService {
         clientId: !kIsWeb && Platform.isIOS
             ? DefaultFirebaseOptions.ios.iosClientId
             : null,
+        serverClientId: !kIsWeb ? DefaultFirebaseOptions.ios.androidClientId : null,
       );
 
   static User? get currentUser => _auth.currentUser;
@@ -765,8 +766,15 @@ class _AuthService {
       idToken: googleAuth.idToken,
     );
     final result = await _auth.signInWithCredential(credential);
-    await _upsertProfile(result.user!);
-    return result.user;
+    final user = result.user;
+    if (user == null) {
+      throw FirebaseAuthException(
+        code: 'null-user',
+        message: 'Firebase sign-in returned no user after Google credential.',
+      );
+    }
+    await _upsertProfile(user);
+    return user;
   }
 
   static Future<User?> signInWithApple() async {
