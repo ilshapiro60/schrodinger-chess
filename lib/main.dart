@@ -32,18 +32,31 @@ Future<void> _requestTrackingConsentIfNeeded() async {
   try {
     final status = await AppTrackingTransparency.trackingAuthorizationStatus;
     if (status == TrackingStatus.notDetermined) {
-      await Future<void>.delayed(const Duration(milliseconds: 100));
       await AppTrackingTransparency.requestTrackingAuthorization();
     }
-  } catch (_) {
-    /* Avoid blocking startup if ATT APIs fail unexpectedly. */
+  } catch (e, st) {
+    assert(() {
+      debugPrint('ATT: request failed: $e\n$st');
+      return true;
+    }());
   }
+}
+
+/// ATT must run after the first frame so UIKit can present the dialog (reliable on iPad).
+/// Mobile Ads initializes only after ATT completes on iOS so tracking consent precedes ad SDK setup.
+Future<void> _bootstrapTrackingAndAds() async {
+  if (kIsWeb) {
+    await MobileAds.instance.initialize();
+    return;
+  }
+  if (Platform.isIOS) {
+    await _requestTrackingConsentIfNeeded();
+  }
+  await MobileAds.instance.initialize();
 }
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await _requestTrackingConsentIfNeeded();
-  await MobileAds.instance.initialize();
   try {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
@@ -186,8 +199,45 @@ class SchrodingerChessApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const GameScreen(),
+      home: const _AppBootstrap(),
     );
+  }
+}
+
+/// Runs ATT + Mobile Ads init after the first frame; then shows the game (so ads never load before initialize).
+class _AppBootstrap extends StatefulWidget {
+  const _AppBootstrap();
+
+  @override
+  State<_AppBootstrap> createState() => _AppBootstrapState();
+}
+
+class _AppBootstrapState extends State<_AppBootstrap> {
+  bool _ready = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _runBootstrap());
+  }
+
+  Future<void> _runBootstrap() async {
+    await _bootstrapTrackingAndAds();
+    if (!mounted) return;
+    setState(() => _ready = true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_ready) {
+      return const Scaffold(
+        backgroundColor: Color(0xFF0D1321),
+        body: Center(
+          child: CircularProgressIndicator(color: Color(0xFF1E5799)),
+        ),
+      );
+    }
+    return const GameScreen();
   }
 }
 

@@ -7,6 +7,9 @@
 	<string>ca-app-pub-3940256099942544~1458002511</string>
 	<key>GIDClientID</key>
 	<string>497194386332-k89dauu7fs5laalqa37uh5mb6bpuq7o9.apps.googleusercontent.com</string>
+	<!-- Web/Android OAuth client — required with Firebase Auth so native GIDSignIn can mint id tokens reliably -->
+	<key>GIDServerClientID</key>
+	<string>497194386332-cr1ht3cuclepgo1bs2mf29hcppvdvn0t.apps.googleusercontent.com</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

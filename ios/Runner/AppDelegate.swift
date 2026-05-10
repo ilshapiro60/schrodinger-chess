@@ -8,6 +8,15 @@ import GoogleSignIn
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
+    // Configure before any sign-in attempt (avoids crashes when presenting on iPad / scene-based apps).
+    if let clientID = Bundle.main.object(forInfoDictionaryKey: "GIDClientID") as? String,
+       !clientID.isEmpty {
+      let serverID = Bundle.main.object(forInfoDictionaryKey: "GIDServerClientID") as? String
+      GIDSignIn.sharedInstance.configuration = GIDConfiguration(
+        clientID: clientID,
+        serverClientID: serverID
+      )
+    }
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
