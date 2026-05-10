@@ -38,7 +38,7 @@ workflows:
       - name: CocoaPods
         script: cd ios && pod install
       - name: Build IPA (CFBundleVersion from pubspec)
-        script: bash scripts/flutter_build_ipa.sh
+        script: bash scripts/flutter_build_ipa.sh --export-options-plist=/Users/builder/export_options.plist
     artifacts:
       - build/ios/ipa/*.ipa
     publishing:
