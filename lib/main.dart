@@ -923,13 +923,23 @@ class _AuthService {
       );
     }
 
-    final authCode = appleCredential.authorizationCode;
     UserCredential result;
     try {
-      result = await _signInWithAppleCredential(
-        idToken: idToken,
-        rawNonce: rawNonce,
-        authCode: authCode.isEmpty ? null : authCode,
+      result = await _auth.signInWithCredential(
+        AppleAuthProvider.credentialWithIDToken(
+          idToken,
+          rawNonce,
+          AppleFullPersonName(
+            givenName: appleCredential.givenName,
+            familyName: appleCredential.familyName,
+          ),
+        ),
+      ).timeout(
+        const Duration(seconds: 30),
+        onTimeout: () => throw FirebaseAuthException(
+          code: 'timeout',
+          message: 'Firebase sign-in timed out after Apple authorization.',
+        ),
       );
     } on FirebaseAuthException catch (e) {
       throw _mapAppleFirebaseError(e);
@@ -949,36 +959,6 @@ class _AuthService {
 
     unawaited(_upsertProfileSafe(user));
     return user;
-  }
-
-  /// Tries id-token-only first, then adds authorization code if Firebase rejects.
-  static Future<UserCredential> _signInWithAppleCredential({
-    required String idToken,
-    required String rawNonce,
-    String? authCode,
-  }) async {
-    Future<UserCredential> attempt({required bool includeAuthCode}) {
-      return _auth.signInWithCredential(
-        OAuthProvider('apple.com').credential(
-          idToken: idToken,
-          rawNonce: rawNonce,
-          accessToken: includeAuthCode ? authCode : null,
-        ),
-      ).timeout(
-        const Duration(seconds: 30),
-        onTimeout: () => throw FirebaseAuthException(
-          code: 'timeout',
-          message: 'Firebase sign-in timed out after Apple authorization.',
-        ),
-      );
-    }
-
-    try {
-      return await attempt(includeAuthCode: false);
-    } on FirebaseAuthException catch (e) {
-      if (e.code != 'invalid-credential' || authCode == null) rethrow;
-      return await attempt(includeAuthCode: true);
-    }
   }
 
   static FirebaseAuthException _mapAppleFirebaseError(FirebaseAuthException e) {
