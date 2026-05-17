@@ -865,42 +865,12 @@ class _AuthService {
   static Future<User?> signInWithApple() async {
     if (!_supportsAppleAuth) return null;
 
-    // iOS/macOS: one Apple sheet, Firebase native flow (nonce handled in FIRAuth).
-    if (!kIsWeb && (Platform.isIOS || Platform.isMacOS)) {
-      try {
-        final provider = AppleAuthProvider();
-        provider.addScope('email');
-        provider.addScope('name');
-        final result = await _auth.signInWithProvider(provider).timeout(
-          const Duration(seconds: 45),
-          onTimeout: () => throw FirebaseAuthException(
-            code: 'timeout',
-            message: 'Firebase sign-in timed out after Apple authorization.',
-          ),
-        );
-        final user = result.user;
-        if (user == null) {
-          throw FirebaseAuthException(
-            code: 'null-user',
-            message: 'Firebase sign-in returned no user after Apple.',
-          );
-        }
-        unawaited(_upsertProfileSafe(user));
-        return user;
-      } on FirebaseAuthException catch (e) {
-        if (e.code == 'canceled' ||
-            e.code == 'cancelled' ||
-            (e.message?.toLowerCase().contains('cancel') ?? false)) {
-          return null;
-        }
-        throw _mapAppleFirebaseError(e);
-      }
-    }
-
+    // Native Apple ID token audience is the bundle ID, not the Services ID.
+    // signInWithProvider expects the OAuth Services ID audience and fails on iOS;
+    // AppleAuthProvider.credentialWithIDToken uses the correct native path.
     return _signInWithAppleManual();
   }
 
-  /// Fallback for platforms without [signInWithProvider] Apple support.
   static Future<User?> _signInWithAppleManual() async {
     final rawNonce = _randomNonceString();
     final nonce = _sha256ofString(rawNonce);
