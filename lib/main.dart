@@ -891,7 +891,13 @@ class _AuthService {
       idToken: idToken,
       rawNonce: rawNonce,
     );
-    final result = await _auth.signInWithCredential(oauthCredential);
+    final result = await _auth.signInWithCredential(oauthCredential).timeout(
+      const Duration(seconds: 30),
+      onTimeout: () => throw FirebaseAuthException(
+        code: 'timeout',
+        message: 'Firebase sign-in timed out after Apple authorization.',
+      ),
+    );
     final user = result.user!;
 
     final builtName = [
@@ -905,8 +911,9 @@ class _AuthService {
       await user.reload();
     }
 
-    await _upsertProfile(_auth.currentUser!);
-    return _auth.currentUser;
+    // Do not block return on Firestore; profile sync can finish in the background.
+    unawaited(_upsertProfileSafe(user));
+    return user;
   }
 
   static Future<void> signOut() async {
@@ -933,6 +940,14 @@ class _AuthService {
       'photoUrl':    user.photoURL    ?? '',
       'lastSeen':    FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
+  }
+
+  static Future<void> _upsertProfileSafe(User user) async {
+    try {
+      await _upsertProfile(user).timeout(const Duration(seconds: 12));
+    } catch (_) {
+      // Sign-in already succeeded; Firestore can sync on next session.
+    }
   }
 
   static Future<Map<String, dynamic>> getStats(String uid) async {
@@ -1208,42 +1223,56 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   // ── Profile ──────────────────────────────────────────────────────────────
+  Future<void> _signInWithGoogleFromProfile() async {
+    try {
+      final user = await _AuthService.signInWithGoogle();
+      if (!mounted) return;
+      if (user != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Signed in as ${user.displayName ?? user.email ?? 'Player'}')),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Sign-in failed: $e')),
+      );
+    }
+  }
+
+  Future<void> _signInWithAppleFromProfile() async {
+    try {
+      final user = await _AuthService.signInWithApple();
+      if (!mounted) return;
+      if (user != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Signed in as ${user.displayName ?? user.email ?? 'Player'}')),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Sign-in failed: $e')),
+      );
+    }
+  }
+
   void _openProfile() {
     showModalBottomSheet(
       context: context,
       backgroundColor: _theme.appBarBg,
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (_) => _ProfileSheet(
+      builder: (sheetContext) => _ProfileSheet(
         theme: _theme,
         user: _currentUser,
         firebaseAvailable: _firebaseAvailable,
-        onSignInWithGoogle: () async {
-          try {
-            await _AuthService.signInWithGoogle();
-            if (context.mounted) Navigator.pop(context);
-          } catch (e) {
-            if (context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Sign-in failed: $e')));
-            }
-          }
-        },
-        onSignInWithApple: (!kIsWeb && Platform.isIOS)
-            ? () async {
-                try {
-                  await _AuthService.signInWithApple();
-                  if (context.mounted) Navigator.pop(context);
-                } catch (e) {
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('Sign-in failed: $e')));
-                  }
-                }
-              }
-            : null,
+        onSignInWithGoogle: _signInWithGoogleFromProfile,
+        onSignInWithApple:
+            (!kIsWeb && Platform.isIOS) ? _signInWithAppleFromProfile : null,
         onSignOut: () async {
-          Navigator.pop(context);
+          Navigator.pop(sheetContext);
           await _AuthService.signOut();
         },
       ),
@@ -1967,17 +1996,43 @@ class _ProfileSheetState extends State<_ProfileSheet> {
   Map<String, dynamic>? _stats;
   bool _loading = false;
   bool _appleSignInAvailable = false;
+  bool _signInInProgress = false;
+  StreamSubscription<User?>? _authSub;
 
   @override
   void initState() {
     super.initState();
     if (widget.user != null) {
       _loadStats();
-    } else if (widget.onSignInWithApple != null) {
-      SignInWithApple.isAvailable().then((available) {
-        if (mounted) setState(() => _appleSignInAvailable = available);
+    } else {
+      if (widget.onSignInWithApple != null) {
+        SignInWithApple.isAvailable().then((available) {
+          if (mounted) setState(() => _appleSignInAvailable = available);
+        });
+      }
+      // Close sheet as soon as auth succeeds (backup if Apple UI lingers on iPad).
+      _authSub = _AuthService.authChanges.listen((user) {
+        if (user != null && mounted && widget.user == null) {
+          Navigator.of(context).pop();
+        }
       });
     }
+  }
+
+  @override
+  void dispose() {
+    _authSub?.cancel();
+    super.dispose();
+  }
+
+  /// Dismiss profile sheet before OAuth so iPad does not stack Apple UI on a bottom sheet.
+  Future<void> _beginOAuthSignIn(Future<void> Function() signIn) async {
+    if (_signInInProgress) return;
+    setState(() => _signInInProgress = true);
+    final sheetNavigator = Navigator.of(context);
+    sheetNavigator.pop();
+    await Future<void>.delayed(const Duration(milliseconds: 350));
+    await signIn();
   }
 
   Future<void> _loadStats() async {
@@ -2018,7 +2073,9 @@ class _ProfileSheetState extends State<_ProfileSheet> {
                 width: double.infinity,
                 height: 50,
                 child: SignInWithAppleButton(
-                  onPressed: () => widget.onSignInWithApple!(),
+                  onPressed: _signInInProgress
+                      ? () {}
+                      : () => _beginOAuthSignIn(widget.onSignInWithApple!),
                   style: SignInWithAppleButtonStyle.black,
                   borderRadius: BorderRadius.circular(8),
                 ),
@@ -2036,7 +2093,9 @@ class _ProfileSheetState extends State<_ProfileSheet> {
                   side: const BorderSide(color: Colors.white30),
                   padding: const EdgeInsets.symmetric(vertical: 14),
                 ),
-                onPressed: () => widget.onSignInWithGoogle(),
+                onPressed: _signInInProgress
+                    ? null
+                    : () => _beginOAuthSignIn(widget.onSignInWithGoogle),
               ),
             ),
           ],
