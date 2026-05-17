@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:isolate';
 import 'dart:math';
 import 'package:app_tracking_transparency/app_tracking_transparency.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -562,20 +561,53 @@ class _AiTurn {
 
 class _ChessAI {
   static const int _depth = 2;
+  static const int _rootTurnCap = 36;
+  static const int _nodeTurnCap = 20;
+  static const Duration _thinkBudget = Duration(seconds: 3);
 
+  static DateTime? _deadline;
+
+  static bool get _timedOut =>
+      _deadline != null && !DateTime.now().isBefore(_deadline!);
+
+  /// Minimax search with a time budget; safe on the main isolate (no [Isolate.run]).
   static _AiTurn? bestTurn(Game g) {
-    final turns = _generateTurns(g);
-    if (turns.isEmpty) return null;
-    _AiTurn? best;
-    int bestScore = -999999;
-    for (final turn in turns) {
-      final score = _minimax(_applyTurn(g.clone(), turn), _depth - 1, -999999, 999999, false);
-      if (score > bestScore) { bestScore = score; best = turn; }
+    _deadline = DateTime.now().add(_thinkBudget);
+    try {
+      final turns = _generateTurns(g, cap: _rootTurnCap);
+      if (turns.isEmpty) return null;
+      _AiTurn? best;
+      int bestScore = -999999;
+      for (final turn in turns) {
+        if (_timedOut) break;
+        final score = _minimax(
+          _applyTurn(g.clone(), turn),
+          _depth - 1,
+          -999999,
+          999999,
+          false,
+        );
+        if (score > bestScore) {
+          bestScore = score;
+          best = turn;
+        }
+      }
+      return best ?? turns.first;
+    } finally {
+      _deadline = null;
     }
-    return best;
+  }
+
+  /// Fast legal move when search times out or errors.
+  static _AiTurn? fallbackTurn(Game g) {
+    final turns = _generateTurns(g, cap: 48);
+    if (turns.isEmpty) return null;
+    turns.sort((a, b) => _moveOrderScore(g, b).compareTo(_moveOrderScore(g, a)));
+    return turns.first;
   }
 
   static int _minimax(Game g, int depth, int alpha, int beta, bool maximizing) {
+    if (_timedOut) return _evaluate(g);
     if (g.phase == GamePhase.gameOver) {
       final w = g.whiteKingsCaptured, b = g.blackKingsCaptured;
       if (b > w) return  90000;
@@ -583,12 +615,13 @@ class _ChessAI {
       return 0;
     }
     if (depth == 0) return _evaluate(g);
-    final turns = _generateTurns(g);
+    final turns = _generateTurns(g, cap: _nodeTurnCap);
     if (turns.isEmpty) return _evaluate(g);
 
     if (maximizing) {
       int best = -999999;
       for (final t in turns) {
+        if (_timedOut) break;
         final v = _minimax(_applyTurn(g.clone(), t), depth - 1, alpha, beta, false);
         if (v > best) best = v;
         if (v > alpha) alpha = v;
@@ -598,6 +631,7 @@ class _ChessAI {
     } else {
       int best = 999999;
       for (final t in turns) {
+        if (_timedOut) break;
         final v = _minimax(_applyTurn(g.clone(), t), depth - 1, alpha, beta, true);
         if (v < best) best = v;
         if (v < beta) beta = v;
@@ -605,6 +639,13 @@ class _ChessAI {
       }
       return best;
     }
+  }
+
+  static int _moveOrderScore(Game g, _AiTurn t) {
+    final victim = g.boards[t.fl][t.tr][t.tc];
+    var score = victim != null ? _pieceValue(victim.type) : 0;
+    if (t.shiftToL != null) score += 12;
+    return score;
   }
 
   static Game _applyTurn(Game g, _AiTurn t) {
@@ -619,7 +660,7 @@ class _ChessAI {
     return g;
   }
 
-  static List<_AiTurn> _generateTurns(Game g) {
+  static List<_AiTurn> _generateTurns(Game g, {int cap = 40}) {
     final turns = <_AiTurn>[];
     for (int l = 0; l < g.boardCount; l++) {
       for (int fr = 0; fr < 8; fr++) {
@@ -638,18 +679,27 @@ class _ChessAI {
               turns.add(_AiTurn(fl: l, fr: fr, fc: fc, tr: mv.row, tc: mv.col));
               continue;
             }
+            // Skip shift (handled in _applyTurn via skipShift).
             turns.add(_AiTurn(fl: l, fr: fr, fc: fc, tr: mv.row, tc: mv.col));
-            for (final sp in g2.shiftablePieces()) {
-              for (final tl in g2.shiftTargets(sp.level, sp.row, sp.col)) {
+            // One shift option per move keeps branching tractable on 3-board games.
+            final shiftables = g2.shiftablePieces();
+            if (shiftables.isNotEmpty) {
+              final sp = shiftables.first;
+              final targets = g2.shiftTargets(sp.level, sp.row, sp.col);
+              if (targets.isNotEmpty) {
                 turns.add(_AiTurn(
                   fl: l, fr: fr, fc: fc, tr: mv.row, tc: mv.col,
-                  shiftR: sp.row, shiftC: sp.col, shiftToL: tl,
+                  shiftR: sp.row, shiftC: sp.col, shiftToL: targets.first,
                 ));
               }
             }
           }
         }
       }
+    }
+    if (turns.length > cap) {
+      turns.sort((a, b) => _moveOrderScore(g, b).compareTo(_moveOrderScore(g, a)));
+      return turns.sublist(0, cap);
     }
     return turns;
   }
@@ -1124,9 +1174,23 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   Future<void> _runAI() async {
-    // Run minimax in a background isolate so the UI stays responsive.
     final snapshot = _game.clone();
-    final turn = await Isolate.run(() => _ChessAI.bestTurn(snapshot));
+    // Let the "AI is thinking…" indicator paint before search runs.
+    await Future<void>.delayed(Duration.zero);
+    if (!mounted) return;
+    _AiTurn? turn;
+    try {
+      turn = await Future<_AiTurn?>(() => _ChessAI.bestTurn(snapshot)).timeout(
+        const Duration(seconds: 4),
+        onTimeout: () => _ChessAI.fallbackTurn(snapshot),
+      );
+    } catch (e, st) {
+      assert(() {
+        debugPrint('AI failed: $e\n$st');
+        return true;
+      }());
+      turn = _ChessAI.fallbackTurn(snapshot);
+    }
     if (!mounted) return;
     setState(() {
       _aiThinking = false;
