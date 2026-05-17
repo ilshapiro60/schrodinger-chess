@@ -27,12 +27,17 @@ String get _bannerAdUnitId => Platform.isIOS ? _kBannerIdIos : _kBannerIdAndroid
 // Whether Firebase was successfully initialised at startup.
 bool _firebaseAvailable = false;
 
+/// True after [MobileAds.instance.initialize] has completed (iOS: only after ATT).
+bool _mobileAdsInitialized = false;
+
 Future<void> _requestTrackingConsentIfNeeded() async {
   if (kIsWeb || !Platform.isIOS) return;
   try {
-    final status = await AppTrackingTransparency.trackingAuthorizationStatus;
+    // UIKit needs a visible window before ATT can present (especially on iPad).
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+    var status = await AppTrackingTransparency.trackingAuthorizationStatus;
     if (status == TrackingStatus.notDetermined) {
-      await AppTrackingTransparency.requestTrackingAuthorization();
+      status = await AppTrackingTransparency.requestTrackingAuthorization();
     }
   } catch (e, st) {
     assert(() {
@@ -42,17 +47,19 @@ Future<void> _requestTrackingConsentIfNeeded() async {
   }
 }
 
-/// ATT must run after the first frame so UIKit can present the dialog (reliable on iPad).
-/// Mobile Ads initializes only after ATT completes on iOS so tracking consent precedes ad SDK setup.
-Future<void> _bootstrapTrackingAndAds() async {
+/// Mobile Ads initializes only after ATT on iOS so consent precedes ad SDK setup.
+Future<void> _initializeMobileAdsIfNeeded() async {
+  if (_mobileAdsInitialized) return;
   if (kIsWeb) {
     await MobileAds.instance.initialize();
+    _mobileAdsInitialized = true;
     return;
   }
   if (Platform.isIOS) {
     await _requestTrackingConsentIfNeeded();
   }
   await MobileAds.instance.initialize();
+  _mobileAdsInitialized = true;
 }
 
 void main() async {
@@ -204,41 +211,12 @@ class SchrodingerChessApp extends StatelessWidget {
   }
 }
 
-/// Runs ATT + Mobile Ads init after the first frame; then shows the game (so ads never load before initialize).
-class _AppBootstrap extends StatefulWidget {
+/// Shows the game immediately; ATT + Mobile Ads run after the first visible frame on [GameScreen].
+class _AppBootstrap extends StatelessWidget {
   const _AppBootstrap();
 
   @override
-  State<_AppBootstrap> createState() => _AppBootstrapState();
-}
-
-class _AppBootstrapState extends State<_AppBootstrap> {
-  bool _ready = false;
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _runBootstrap());
-  }
-
-  Future<void> _runBootstrap() async {
-    await _bootstrapTrackingAndAds();
-    if (!mounted) return;
-    setState(() => _ready = true);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (!_ready) {
-      return const Scaffold(
-        backgroundColor: Color(0xFF0D1321),
-        body: Center(
-          child: CircularProgressIndicator(color: Color(0xFF1E5799)),
-        ),
-      );
-    }
-    return const GameScreen();
-  }
+  Widget build(BuildContext context) => const GameScreen();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -800,31 +778,38 @@ class _AuthService {
   static Stream<User?> get authChanges => _auth.authStateChanges();
 
   static Future<User?> signInWithGoogle() async {
-    final googleUser = await _googleSignIn().signIn();
-    if (googleUser == null) return null;
-    final googleAuth = await googleUser.authentication;
-    if (googleAuth.idToken == null) {
-      await _googleSignIn().signOut();
+    try {
+      final googleUser = await _googleSignIn().signIn();
+      if (googleUser == null) return null;
+      final googleAuth = await googleUser.authentication;
+      if (googleAuth.idToken == null) {
+        await _googleSignIn().signOut();
+        throw FirebaseAuthException(
+          code: 'missing-id-token',
+          message: 'Google Sign-In returned no ID token. Check Firebase iOS bundle ID '
+              'matches the App Store id (${DefaultFirebaseOptions.ios.iosBundleId}).',
+        );
+      }
+      final credential = GoogleAuthProvider.credential(
+        accessToken: googleAuth.accessToken,
+        idToken: googleAuth.idToken,
+      );
+      final result = await _auth.signInWithCredential(credential);
+      final user = result.user;
+      if (user == null) {
+        throw FirebaseAuthException(
+          code: 'null-user',
+          message: 'Firebase sign-in returned no user after Google credential.',
+        );
+      }
+      await _upsertProfile(user);
+      return user;
+    } on PlatformException catch (e) {
       throw FirebaseAuthException(
-        code: 'missing-id-token',
-        message: 'Google Sign-In returned no ID token. Check Firebase iOS bundle ID '
-            'matches the App Store id (${DefaultFirebaseOptions.ios.iosBundleId}).',
+        code: e.code,
+        message: e.message ?? 'Google Sign-In failed.',
       );
     }
-    final credential = GoogleAuthProvider.credential(
-      accessToken: googleAuth.accessToken,
-      idToken: googleAuth.idToken,
-    );
-    final result = await _auth.signInWithCredential(credential);
-    final user = result.user;
-    if (user == null) {
-      throw FirebaseAuthException(
-        code: 'null-user',
-        message: 'Firebase sign-in returned no user after Google credential.',
-      );
-    }
-    await _upsertProfile(user);
-    return user;
   }
 
   static Future<User?> signInWithApple() async {
@@ -832,13 +817,19 @@ class _AuthService {
 
     final rawNonce = _randomNonceString();
     final nonce = _sha256ofString(rawNonce);
-    final appleCredential = await SignInWithApple.getAppleIDCredential(
-      scopes: const [
-        AppleIDAuthorizationScopes.email,
-        AppleIDAuthorizationScopes.fullName,
-      ],
-      nonce: nonce,
-    );
+    final AuthorizationCredentialAppleID appleCredential;
+    try {
+      appleCredential = await SignInWithApple.getAppleIDCredential(
+        scopes: const [
+          AppleIDAuthorizationScopes.email,
+          AppleIDAuthorizationScopes.fullName,
+        ],
+        nonce: nonce,
+      );
+    } on SignInWithAppleAuthorizationException catch (e) {
+      if (e.code == AuthorizationErrorCode.canceled) return null;
+      rethrow;
+    }
     final idToken = appleCredential.identityToken;
     if (idToken == null) {
       throw FirebaseAuthException(
@@ -948,8 +939,11 @@ class _GameScreenState extends State<GameScreen> {
   User?       _currentUser;
   StreamSubscription<User?>? _authSub;
 
-  // Purchases
+  // Purchases / ads
   bool        _adsRemoved  = false;
+  bool        _adsSdkReady = false;
+  /// null = still checking StoreKit; true = product loaded; false = hide Remove Ads UI.
+  bool?       _removeAdsOfferAvailable;
   StreamSubscription<List<PurchaseDetails>>? _purchaseSub;
 
   ChessTheme get _theme => kThemes[_themeIndex];
@@ -969,11 +963,26 @@ class _GameScreenState extends State<GameScreen> {
         if (mounted) setState(() => _currentUser = user);
       });
     }
-    _initPurchases();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _bootstrapAdsAndPurchases());
+  }
+
+  Future<void> _bootstrapAdsAndPurchases() async {
+    if (!kIsWeb) {
+      await _initializeMobileAdsIfNeeded();
+    }
+    if (!mounted) return;
+    setState(() => _adsSdkReady = _mobileAdsInitialized || kIsWeb);
+    await _initPurchases();
   }
 
   Future<void> _initPurchases() async {
     _adsRemoved = await _PurchaseService.loadAdsRemoved();
+    if (!_adsRemoved && !kIsWeb && (Platform.isIOS || Platform.isAndroid)) {
+      final product = await _PurchaseService.getProduct();
+      _removeAdsOfferAvailable = product != null;
+    } else {
+      _removeAdsOfferAvailable = false;
+    }
     if (mounted) setState(() {});
     _purchaseSub = InAppPurchase.instance.purchaseStream.listen(
       _handlePurchaseUpdate,
@@ -1146,11 +1155,11 @@ class _GameScreenState extends State<GameScreen> {
         user: _currentUser,
         firebaseAvailable: _firebaseAvailable,
         onSignInWithGoogle: () async {
-          Navigator.pop(context);
           try {
             await _AuthService.signInWithGoogle();
+            if (context.mounted) Navigator.pop(context);
           } catch (e) {
-            if (mounted) {
+            if (context.mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text('Sign-in failed: $e')));
             }
@@ -1158,11 +1167,11 @@ class _GameScreenState extends State<GameScreen> {
         },
         onSignInWithApple: (!kIsWeb && Platform.isIOS)
             ? () async {
-                Navigator.pop(context);
                 try {
                   await _AuthService.signInWithApple();
+                  if (context.mounted) Navigator.pop(context);
                 } catch (e) {
-                  if (mounted) {
+                  if (context.mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(content: Text('Sign-in failed: $e')));
                   }
@@ -1640,7 +1649,7 @@ class _GameScreenState extends State<GameScreen> {
           ],
         ]),
         actions: [
-          if (!_adsRemoved)
+          if (!_adsRemoved && (_removeAdsOfferAvailable ?? false))
             IconButton(
               icon: const Icon(Icons.block, size: 20),
               tooltip: 'Remove Ads',
@@ -1672,7 +1681,7 @@ class _GameScreenState extends State<GameScreen> {
         ],
       ),
       body: Column(children: [
-        if (!_adsRemoved) const _BannerAdWidget(),
+        if (!_adsRemoved && _adsSdkReady) const _BannerAdWidget(),
         _StatusBar(
           game:               _game,
           theme:              t,
@@ -1832,6 +1841,7 @@ class _BannerAdWidgetState extends State<_BannerAdWidget> {
   }
 
   Future<void> _loadAd() async {
+    if (!_mobileAdsInitialized && !kIsWeb) return;
     final width = MediaQuery.of(context).size.width.truncate();
     final size  = await AdSize.getCurrentOrientationAnchoredAdaptiveBannerAdSize(width);
     if (size == null || !mounted) return;
@@ -1892,11 +1902,18 @@ class _ProfileSheet extends StatefulWidget {
 class _ProfileSheetState extends State<_ProfileSheet> {
   Map<String, dynamic>? _stats;
   bool _loading = false;
+  bool _appleSignInAvailable = false;
 
   @override
   void initState() {
     super.initState();
-    if (widget.user != null) _loadStats();
+    if (widget.user != null) {
+      _loadStats();
+    } else if (widget.onSignInWithApple != null) {
+      SignInWithApple.isAvailable().then((available) {
+        if (mounted) setState(() => _appleSignInAvailable = available);
+      });
+    }
   }
 
   Future<void> _loadStats() async {
@@ -1932,10 +1949,10 @@ class _ProfileSheetState extends State<_ProfileSheet> {
               style: TextStyle(color: Colors.white54, fontSize: 13)),
           const SizedBox(height: 24),
           if (widget.firebaseAvailable) ...[
-            if (widget.onSignInWithApple != null) ...[
+            if (widget.onSignInWithApple != null && _appleSignInAvailable) ...[
               SizedBox(
                 width: double.infinity,
-                height: 48,
+                height: 50,
                 child: SignInWithAppleButton(
                   onPressed: () => widget.onSignInWithApple!(),
                   style: SignInWithAppleButtonStyle.black,
