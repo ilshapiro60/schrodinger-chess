@@ -881,15 +881,24 @@ class _AuthService {
       rethrow;
     }
     final idToken = appleCredential.identityToken;
+    final authCode = appleCredential.authorizationCode;
     if (idToken == null) {
       throw FirebaseAuthException(
         code: 'missing-apple-id-token',
         message: 'Sign in with Apple did not return an identity token.',
       );
     }
+    if (authCode.isEmpty) {
+      throw FirebaseAuthException(
+        code: 'missing-apple-auth-code',
+        message: 'Sign in with Apple did not return an authorization code.',
+      );
+    }
+    // firebase_auth 5.2+ requires authorizationCode as accessToken for Apple.
     final oauthCredential = OAuthProvider('apple.com').credential(
       idToken: idToken,
       rawNonce: rawNonce,
+      accessToken: authCode,
     );
     UserCredential result;
     try {
@@ -906,6 +915,13 @@ class _AuthService {
           code: e.code,
           message: 'Sign in with Apple is not enabled in Firebase. '
               'Open Firebase Console → Authentication → Sign-in method → Apple → Enable.',
+        );
+      }
+      if (e.code == 'invalid-credential') {
+        throw FirebaseAuthException(
+          code: e.code,
+          message: 'Apple sign-in rejected by Firebase. In Firebase Console → '
+              'Authentication → Apple, add your Apple Team ID, Key ID, and .p8 private key.',
         );
       }
       rethrow;
