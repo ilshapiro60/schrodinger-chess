@@ -865,41 +865,7 @@ class _AuthService {
   static Future<User?> signInWithApple() async {
     if (!_supportsAppleAuth) return null;
 
-    // Prefer Firebase's native Apple flow on iOS (handles nonce + token exchange).
-    if (!kIsWeb && Platform.isIOS) {
-      try {
-        final provider = AppleAuthProvider();
-        provider.addScope('email');
-        provider.addScope('name');
-        final result = await _auth.signInWithProvider(provider).timeout(
-          const Duration(seconds: 45),
-        );
-        final user = result.user;
-        if (user == null) {
-          throw FirebaseAuthException(
-            code: 'null-user',
-            message: 'Firebase sign-in returned no user after Apple.',
-          );
-        }
-        unawaited(_upsertProfileSafe(user));
-        return user;
-      } on FirebaseAuthException catch (e) {
-        if (_isAppleSignInCanceled(e)) return null;
-        if (e.code != 'invalid-credential') rethrow;
-        // Fall through to manual credential flow.
-      }
-    }
-
-    return _signInWithAppleManual();
-  }
-
-  static bool _isAppleSignInCanceled(FirebaseAuthException e) {
-    if (e.code == 'canceled' || e.code == 'cancelled') return true;
-    final msg = e.message?.toLowerCase() ?? '';
-    return msg.contains('cancel');
-  }
-
-  static Future<User?> _signInWithAppleManual() async {
+    // One Apple UI only — do not call signInWithProvider then getAppleIDCredential again.
     final rawNonce = _randomNonceString();
     final nonce = _sha256ofString(rawNonce);
     final AuthorizationCredentialAppleID appleCredential;
@@ -915,6 +881,7 @@ class _AuthService {
       if (e.code == AuthorizationErrorCode.canceled) return null;
       rethrow;
     }
+
     final idToken = appleCredential.identityToken;
     if (idToken == null) {
       throw FirebaseAuthException(
@@ -922,24 +889,16 @@ class _AuthService {
         message: 'Sign in with Apple did not return an identity token.',
       );
     }
+    final authCode = appleCredential.authorizationCode;
 
     UserCredential result;
     try {
-      result = await _auth.signInWithCredential(
-        AppleAuthProvider.credentialWithIDToken(
-          idToken,
-          rawNonce,
-          AppleFullPersonName(
-            givenName: appleCredential.givenName,
-            familyName: appleCredential.familyName,
-          ),
-        ),
-      ).timeout(
-        const Duration(seconds: 30),
-        onTimeout: () => throw FirebaseAuthException(
-          code: 'timeout',
-          message: 'Firebase sign-in timed out after Apple authorization.',
-        ),
+      result = await _signInToFirebaseWithAppleTokens(
+        idToken: idToken,
+        rawNonce: rawNonce,
+        authCode: authCode.isEmpty ? null : authCode,
+        givenName: appleCredential.givenName,
+        familyName: appleCredential.familyName,
       );
     } on FirebaseAuthException catch (e) {
       throw _mapAppleFirebaseError(e);
@@ -961,6 +920,44 @@ class _AuthService {
     return user;
   }
 
+  /// Tries native Apple credential first, then OAuth code exchange (Firebase + .p8 key).
+  static Future<UserCredential> _signInToFirebaseWithAppleTokens({
+    required String idToken,
+    required String rawNonce,
+    String? authCode,
+    String? givenName,
+    String? familyName,
+  }) async {
+    Future<UserCredential> signIn(AuthCredential credential) {
+      return _auth.signInWithCredential(credential).timeout(
+        const Duration(seconds: 30),
+        onTimeout: () => throw FirebaseAuthException(
+          code: 'timeout',
+          message: 'Firebase sign-in timed out after Apple authorization.',
+        ),
+      );
+    }
+
+    try {
+      return await signIn(
+        AppleAuthProvider.credentialWithIDToken(
+          idToken,
+          rawNonce,
+          AppleFullPersonName(givenName: givenName, familyName: familyName),
+        ),
+      );
+    } on FirebaseAuthException catch (e) {
+      if (e.code != 'invalid-credential' || authCode == null) rethrow;
+    }
+
+    // OAuth code flow (uses Services ID + .p8 in Firebase Console).
+    return signIn(OAuthProvider('apple.com').credential(
+      idToken: idToken,
+      rawNonce: rawNonce,
+      accessToken: authCode,
+    ));
+  }
+
   static FirebaseAuthException _mapAppleFirebaseError(FirebaseAuthException e) {
     if (e.code == 'operation-not-allowed') {
       return FirebaseAuthException(
@@ -970,11 +967,15 @@ class _AuthService {
       );
     }
     if (e.code == 'invalid-credential') {
+      final detail = e.message?.trim();
       return FirebaseAuthException(
         code: e.code,
-        message: 'Apple sign-in rejected by Firebase. Verify Firebase → Apple: '
-            'Services ID must be your Services ID (e.g. com.pryroinc.schrodingerchess.signin), '
-            'not the App ID; Team ID 7TVRJ53TSR; correct Key ID; full .p8 key pasted.',
+        message: 'Apple sign-in rejected by Firebase. '
+            'In Firebase → Apple: Services ID com.pryroinc.schrodingerchess.signin, '
+            'Team ID 7TVRJ53TSR, Key ID L8L74V643S, full .p8 for that key. '
+            'In Firebase → Project settings → iOS app, bundle ID must be '
+            'com.pryroinc.schrodingerchess.'
+            '${detail != null && detail.isNotEmpty ? ' ($detail)' : ''}',
       );
     }
     return e;
