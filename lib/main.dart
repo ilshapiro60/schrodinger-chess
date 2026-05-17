@@ -891,13 +891,25 @@ class _AuthService {
       idToken: idToken,
       rawNonce: rawNonce,
     );
-    final result = await _auth.signInWithCredential(oauthCredential).timeout(
-      const Duration(seconds: 30),
-      onTimeout: () => throw FirebaseAuthException(
-        code: 'timeout',
-        message: 'Firebase sign-in timed out after Apple authorization.',
-      ),
-    );
+    UserCredential result;
+    try {
+      result = await _auth.signInWithCredential(oauthCredential).timeout(
+        const Duration(seconds: 30),
+        onTimeout: () => throw FirebaseAuthException(
+          code: 'timeout',
+          message: 'Firebase sign-in timed out after Apple authorization.',
+        ),
+      );
+    } on FirebaseAuthException catch (e) {
+      if (e.code == 'operation-not-allowed') {
+        throw FirebaseAuthException(
+          code: e.code,
+          message: 'Sign in with Apple is not enabled in Firebase. '
+              'Open Firebase Console → Authentication → Sign-in method → Apple → Enable.',
+        );
+      }
+      rethrow;
+    }
     final user = result.user!;
 
     final builtName = [
