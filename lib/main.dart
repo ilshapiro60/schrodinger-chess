@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'package:app_tracking_transparency/app_tracking_transparency.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:crypto/crypto.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
@@ -862,14 +864,12 @@ class _AuthService {
 
   static Future<User?> signInWithApple() async {
     if (!_supportsAppleAuth) return null;
-
-    // Do not send the native identity token: its audience is the bundle ID, while
-    // Firebase OAuth (Services ID + .p8) expects com.pryroinc.schrodingerchess.signin.
-    // Exchange only the authorization code so Firebase validates server-side.
     return _signInWithAppleManual();
   }
 
   static Future<User?> _signInWithAppleManual() async {
+    final rawNonce = _randomNonceString();
+    final nonce = _sha256ofString(rawNonce);
     final AuthorizationCredentialAppleID appleCredential;
     try {
       appleCredential = await SignInWithApple.getAppleIDCredential(
@@ -877,13 +877,21 @@ class _AuthService {
           AppleIDAuthorizationScopes.email,
           AppleIDAuthorizationScopes.fullName,
         ],
+        nonce: nonce,
       );
     } on SignInWithAppleAuthorizationException catch (e) {
       if (e.code == AuthorizationErrorCode.canceled) return null;
       rethrow;
     }
 
+    final idToken = appleCredential.identityToken;
     final authCode = appleCredential.authorizationCode;
+    if (idToken == null || idToken.isEmpty) {
+      throw FirebaseAuthException(
+        code: 'missing-apple-id-token',
+        message: 'Sign in with Apple did not return an identity token.',
+      );
+    }
     if (authCode.isEmpty) {
       throw FirebaseAuthException(
         code: 'missing-apple-auth-code',
@@ -893,8 +901,12 @@ class _AuthService {
 
     UserCredential result;
     try {
+      // firebase_auth 5.2+ needs id token + nonce + auth code together on iOS.
+      // Code-only OAuthProvider triggers an internal-error localhost redirect.
       result = await _auth.signInWithCredential(
         OAuthProvider('apple.com').credential(
+          idToken: idToken,
+          rawNonce: rawNonce,
           accessToken: authCode,
         ),
       ).timeout(
@@ -921,6 +933,16 @@ class _AuthService {
             'Open Firebase Console → Authentication → Sign-in method → Apple → Enable.',
       );
     }
+    if (e.code == 'internal-error') {
+      final detail = e.message?.trim();
+      return FirebaseAuthException(
+        code: e.code,
+        message: 'Apple sign-in failed inside Firebase Auth. '
+            'Confirm Firebase → Apple has Services ID com.pryroinc.schrodingerchess.signin, '
+            'Team ID 7TVRJ53TSR, Key ID L8L74V643S, and the full .p8 key.'
+            '${detail != null && detail.isNotEmpty ? ' ($detail)' : ''}',
+      );
+    }
     if (e.code == 'invalid-credential' ||
         e.code == 'missing-or-invalid-nonce') {
       final detail = e.message?.trim();
@@ -935,6 +957,19 @@ class _AuthService {
       );
     }
     return e;
+  }
+
+  static String _randomNonceString([int length = 32]) {
+    const charset =
+        '0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._';
+    final random = Random.secure();
+    return List.generate(length, (_) => charset[random.nextInt(charset.length)])
+        .join();
+  }
+
+  static String _sha256ofString(String input) {
+    final bytes = utf8.encode(input);
+    return sha256.convert(bytes).toString();
   }
 
   static Future<void> signOut() async {
