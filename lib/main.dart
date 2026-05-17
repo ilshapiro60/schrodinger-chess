@@ -865,7 +865,43 @@ class _AuthService {
   static Future<User?> signInWithApple() async {
     if (!_supportsAppleAuth) return null;
 
-    // One Apple UI only — do not call signInWithProvider then getAppleIDCredential again.
+    // iOS/macOS: one Apple sheet, Firebase native flow (nonce handled in FIRAuth).
+    if (!kIsWeb && (Platform.isIOS || Platform.isMacOS)) {
+      try {
+        final provider = AppleAuthProvider();
+        provider.addScope('email');
+        provider.addScope('name');
+        final result = await _auth.signInWithProvider(provider).timeout(
+          const Duration(seconds: 45),
+          onTimeout: () => throw FirebaseAuthException(
+            code: 'timeout',
+            message: 'Firebase sign-in timed out after Apple authorization.',
+          ),
+        );
+        final user = result.user;
+        if (user == null) {
+          throw FirebaseAuthException(
+            code: 'null-user',
+            message: 'Firebase sign-in returned no user after Apple.',
+          );
+        }
+        unawaited(_upsertProfileSafe(user));
+        return user;
+      } on FirebaseAuthException catch (e) {
+        if (e.code == 'canceled' ||
+            e.code == 'cancelled' ||
+            (e.message?.toLowerCase().contains('cancel') ?? false)) {
+          return null;
+        }
+        throw _mapAppleFirebaseError(e);
+      }
+    }
+
+    return _signInWithAppleManual();
+  }
+
+  /// Fallback for platforms without [signInWithProvider] Apple support.
+  static Future<User?> _signInWithAppleManual() async {
     final rawNonce = _randomNonceString();
     final nonce = _sha256ofString(rawNonce);
     final AuthorizationCredentialAppleID appleCredential;
@@ -889,73 +925,32 @@ class _AuthService {
         message: 'Sign in with Apple did not return an identity token.',
       );
     }
-    final authCode = appleCredential.authorizationCode;
 
     UserCredential result;
     try {
-      result = await _signInToFirebaseWithAppleTokens(
-        idToken: idToken,
-        rawNonce: rawNonce,
-        authCode: authCode.isEmpty ? null : authCode,
-        givenName: appleCredential.givenName,
-        familyName: appleCredential.familyName,
-      );
-    } on FirebaseAuthException catch (e) {
-      throw _mapAppleFirebaseError(e);
-    }
-
-    final user = result.user!;
-    final builtName = [
-      appleCredential.givenName,
-      appleCredential.familyName,
-    ].whereType<String>().where((s) => s.isNotEmpty).join(' ');
-    final fromApple = builtName.trim();
-    if (fromApple.isNotEmpty &&
-        (user.displayName == null || user.displayName!.trim().isEmpty)) {
-      await user.updateDisplayName(fromApple);
-      await user.reload();
-    }
-
-    unawaited(_upsertProfileSafe(user));
-    return user;
-  }
-
-  /// Tries native Apple credential first, then OAuth code exchange (Firebase + .p8 key).
-  static Future<UserCredential> _signInToFirebaseWithAppleTokens({
-    required String idToken,
-    required String rawNonce,
-    String? authCode,
-    String? givenName,
-    String? familyName,
-  }) async {
-    Future<UserCredential> signIn(AuthCredential credential) {
-      return _auth.signInWithCredential(credential).timeout(
+      result = await _auth.signInWithCredential(
+        AppleAuthProvider.credentialWithIDToken(
+          idToken,
+          rawNonce,
+          AppleFullPersonName(
+            givenName: appleCredential.givenName,
+            familyName: appleCredential.familyName,
+          ),
+        ),
+      ).timeout(
         const Duration(seconds: 30),
         onTimeout: () => throw FirebaseAuthException(
           code: 'timeout',
           message: 'Firebase sign-in timed out after Apple authorization.',
         ),
       );
-    }
-
-    try {
-      return await signIn(
-        AppleAuthProvider.credentialWithIDToken(
-          idToken,
-          rawNonce,
-          AppleFullPersonName(givenName: givenName, familyName: familyName),
-        ),
-      );
     } on FirebaseAuthException catch (e) {
-      if (e.code != 'invalid-credential' || authCode == null) rethrow;
+      throw _mapAppleFirebaseError(e);
     }
 
-    // OAuth code flow (uses Services ID + .p8 in Firebase Console).
-    return signIn(OAuthProvider('apple.com').credential(
-      idToken: idToken,
-      rawNonce: rawNonce,
-      accessToken: authCode,
-    ));
+    final user = result.user!;
+    unawaited(_upsertProfileSafe(user));
+    return user;
   }
 
   static FirebaseAuthException _mapAppleFirebaseError(FirebaseAuthException e) {
@@ -966,7 +961,8 @@ class _AuthService {
             'Open Firebase Console → Authentication → Sign-in method → Apple → Enable.',
       );
     }
-    if (e.code == 'invalid-credential') {
+    if (e.code == 'invalid-credential' ||
+        e.code == 'missing-or-invalid-nonce') {
       final detail = e.message?.trim();
       return FirebaseAuthException(
         code: e.code,
