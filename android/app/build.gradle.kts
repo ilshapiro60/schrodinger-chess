@@ -19,7 +19,7 @@ fun Properties.requireProperty(name: String): String =
     getProperty(name) ?: error("key.properties is missing or invalid: $name")
 
 android {
-    namespace = "com.example.schroedinger_chess"
+    namespace = "com.pryroinc.schrodingerchess"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -33,8 +33,7 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.schroedinger_chess"
+        applicationId = "com.pryroinc.schrodingerchess"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
@@ -56,11 +55,13 @@ android {
 
     buildTypes {
         release {
-            signingConfig = if (keystorePropertiesFile.exists()) {
-                signingConfigs.getByName("release")
-            } else {
-                signingConfigs.getByName("debug")
+            if (!keystorePropertiesFile.exists()) {
+                throw GradleException(
+                    "Release builds require android/key.properties and upload-keystore.jks. " +
+                        "Run android/create-release-keystore.ps1 first.",
+                )
             }
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 }

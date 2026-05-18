@@ -9,7 +9,7 @@
       "client_info": {
         "mobilesdk_app_id": "1:497194386332:android:ea76df3877af64c25d3e59",
         "android_client_info": {
-          "package_name": "com.example.schroedinger_chess"
+          "package_name": "com.pryroinc.schrodingerchess"
         }
       },
       "oauth_client": [
@@ -17,7 +17,7 @@
           "client_id": "497194386332-cr1ht3cuclepgo1bs2mf29hcppvdvn0t.apps.googleusercontent.com",
           "client_type": 1,
           "android_info": {
-            "package_name": "com.example.schroedinger_chess",
+            "package_name": "com.pryroinc.schrodingerchess",
             "certificate_hash": "9dfd07d4778c8571876bbd2dbda279bd75b66e1c"
           }
         },

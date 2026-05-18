@@ -1,4 +1,4 @@
-package com.example.schroedinger_chess
+package com.pryroinc.schrodingerchess
 
 import io.flutter.embedding.android.FlutterActivity
 
