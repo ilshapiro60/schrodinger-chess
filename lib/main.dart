@@ -827,13 +827,30 @@ class _AuthService {
   static User? get currentUser => _auth.currentUser;
   static Stream<User?> get authChanges => _auth.authStateChanges();
 
+  static bool get _isPadLayout {
+    if (kIsWeb || !Platform.isIOS) return false;
+    final view = WidgetsBinding.instance.platformDispatcher.views.firstOrNull;
+    if (view == null) return false;
+    final logicalSize = view.physicalSize / view.devicePixelRatio;
+    return logicalSize.shortestSide >= 600;
+  }
+
   static Future<User?> signInWithGoogle() async {
+    final google = _googleSignIn();
     try {
-      final googleUser = await _googleSignIn().signIn();
+      // Avoid presenting GIDSignIn while a stale session exists (iPad review crash).
+      if (!kIsWeb && Platform.isIOS && _isPadLayout) {
+        try {
+          await google.signOut();
+        } catch (_) {}
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+      }
+
+      final googleUser = await google.signIn();
       if (googleUser == null) return null;
       final googleAuth = await googleUser.authentication;
       if (googleAuth.idToken == null) {
-        await _googleSignIn().signOut();
+        await google.signOut();
         throw FirebaseAuthException(
           code: 'missing-id-token',
           message: 'Google Sign-In returned no ID token. Check Firebase iOS bundle ID '
@@ -858,6 +875,13 @@ class _AuthService {
       throw FirebaseAuthException(
         code: e.code,
         message: e.message ?? 'Google Sign-In failed.',
+      );
+    } on FirebaseAuthException {
+      rethrow;
+    } catch (e) {
+      throw FirebaseAuthException(
+        code: 'google-sign-in-failed',
+        message: 'Google Sign-In failed: $e',
       );
     }
   }
@@ -2070,14 +2094,35 @@ class _ProfileSheetState extends State<_ProfileSheet> {
     super.dispose();
   }
 
-  /// Dismiss profile sheet before OAuth so iPad does not stack Apple UI on a bottom sheet.
+  /// Dismiss profile sheet before OAuth so iPad does not stack OAuth UI on a bottom sheet.
   Future<void> _beginOAuthSignIn(Future<void> Function() signIn) async {
     if (_signInInProgress) return;
     setState(() => _signInInProgress = true);
-    final sheetNavigator = Navigator.of(context);
-    sheetNavigator.pop();
-    await Future<void>.delayed(const Duration(milliseconds: 350));
-    await signIn();
+    Navigator.of(context).pop();
+    await _waitForOAuthPresentingSurface();
+    try {
+      await signIn();
+    } catch (_) {
+      // Caller shows SnackBar; swallow so async errors cannot take down the isolate.
+    }
+  }
+
+  /// Let the modal dismiss finish before GIDSignIn / Apple present their UI.
+  static Future<void> _waitForOAuthPresentingSurface() async {
+    final frameDone = Completer<void>();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!frameDone.isCompleted) frameDone.complete();
+    });
+    await frameDone.future;
+    final isIOS = !kIsWeb && Platform.isIOS;
+    final views = WidgetsBinding.instance.platformDispatcher.views;
+    final isPad = isIOS &&
+        views.isNotEmpty &&
+        (views.first.physicalSize / views.first.devicePixelRatio).shortestSide >=
+            600;
+    await Future<void>.delayed(
+      Duration(milliseconds: isPad ? 600 : 250),
+    );
   }
 
   Future<void> _loadStats() async {
