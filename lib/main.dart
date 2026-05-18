@@ -812,12 +812,6 @@ class _AuthService {
   static final _db = FirebaseFirestore.instance;
   static GoogleSignIn? _google;
 
-  /// Must match Firebase Apple provider + Apple Developer Services ID.
-  static const _appleServicesId = 'com.pryroinc.schrodingerchess.signin';
-  static final _appleRedirectUri = Uri.parse(
-    'https://schrodingerchess.firebaseapp.com/__/auth/handler',
-  );
-
   static bool get _supportsAppleAuth =>
       !kIsWeb && (Platform.isIOS || Platform.isMacOS);
 
@@ -884,12 +878,6 @@ class _AuthService {
           AppleIDAuthorizationScopes.fullName,
         ],
         nonce: nonce,
-        // Native flow issues tokens for the bundle ID; Firebase OAuth expects the
-        // Services ID audience when OAuth code flow is configured in console.
-        webAuthenticationOptions: WebAuthenticationOptions(
-          clientId: _appleServicesId,
-          redirectUri: _appleRedirectUri,
-        ),
       );
     } on SignInWithAppleAuthorizationException catch (e) {
       if (e.code == AuthorizationErrorCode.canceled) return null;
@@ -897,29 +885,23 @@ class _AuthService {
     }
 
     final idToken = appleCredential.identityToken;
-    final authCode = appleCredential.authorizationCode;
     if (idToken == null || idToken.isEmpty) {
       throw FirebaseAuthException(
         code: 'missing-apple-id-token',
         message: 'Sign in with Apple did not return an identity token.',
       );
     }
-    if (authCode.isEmpty) {
-      throw FirebaseAuthException(
-        code: 'missing-apple-auth-code',
-        message: 'Sign in with Apple did not return an authorization code.',
-      );
-    }
 
     UserCredential result;
     try {
-      // firebase_auth 5.2+ needs id token + nonce + auth code together on iOS.
-      // Code-only OAuthProvider triggers an internal-error localhost redirect.
       result = await _auth.signInWithCredential(
-        OAuthProvider('apple.com').credential(
-          idToken: idToken,
-          rawNonce: rawNonce,
-          accessToken: authCode,
+        AppleAuthProvider.credentialWithIDToken(
+          idToken,
+          rawNonce,
+          AppleFullPersonName(
+            givenName: appleCredential.givenName,
+            familyName: appleCredential.familyName,
+          ),
         ),
       ).timeout(
         const Duration(seconds: 30),
@@ -950,22 +932,30 @@ class _AuthService {
       return FirebaseAuthException(
         code: e.code,
         message: 'Apple sign-in failed inside Firebase Auth. '
-            'Confirm Firebase → Apple has Services ID com.pryroinc.schrodingerchess.signin, '
-            'Team ID 7TVRJ53TSR, Key ID L8L74V643S, and the full .p8 key.'
+            'Confirm Firebase → Apple Services ID is '
+            '${DefaultFirebaseOptions.ios.iosBundleId}, Team ID 7TVRJ53TSR, '
+            'Key ID L8L74V643S, and the full .p8 key.'
             '${detail != null && detail.isNotEmpty ? ' ($detail)' : ''}',
       );
     }
     if (e.code == 'invalid-credential' ||
         e.code == 'missing-or-invalid-nonce') {
-      final detail = e.message?.trim();
+      final detail = e.message?.trim() ?? '';
+      final audienceMismatch = detail.contains('audience');
       return FirebaseAuthException(
         code: e.code,
-        message: 'Apple sign-in rejected by Firebase. '
-            'In Firebase → Apple: Services ID com.pryroinc.schrodingerchess.signin, '
-            'Team ID 7TVRJ53TSR, Key ID L8L74V643S, full .p8 for that key. '
-            'In Firebase → Project settings → iOS app, bundle ID must be '
-            'com.pryroinc.schrodingerchess.'
-            '${detail != null && detail.isNotEmpty ? ' ($detail)' : ''}',
+        message: audienceMismatch
+            ? 'Firebase Apple Services ID must match the iOS bundle ID for native sign-in. '
+                'Open Firebase → Authentication → Apple and set Services ID to '
+                '${DefaultFirebaseOptions.ios.iosBundleId} (not .signin). '
+                'Keep Team ID 7TVRJ53TSR, Key ID L8L74V643S, and the .p8 key. '
+                'Apple Developer can keep Services ID com.pryroinc.schrodingerchess.signin '
+                'for web; only the Firebase field must be the bundle ID.'
+            : 'Apple sign-in rejected by Firebase. '
+                'Check Firebase → Apple: Services ID must be '
+                '${DefaultFirebaseOptions.ios.iosBundleId}, Team ID 7TVRJ53TSR, '
+                'Key ID L8L74V643S, full .p8.'
+                '${detail.isNotEmpty ? ' ($detail)' : ''}',
       );
     }
     return e;
