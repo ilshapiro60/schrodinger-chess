@@ -812,6 +812,12 @@ class _AuthService {
   static final _db = FirebaseFirestore.instance;
   static GoogleSignIn? _google;
 
+  /// Must match Firebase Apple provider + Apple Developer Services ID.
+  static const _appleServicesId = 'com.pryroinc.schrodingerchess.signin';
+  static final _appleRedirectUri = Uri.parse(
+    'https://schrodingerchess.firebaseapp.com/__/auth/handler',
+  );
+
   static bool get _supportsAppleAuth =>
       !kIsWeb && (Platform.isIOS || Platform.isMacOS);
 
@@ -878,6 +884,12 @@ class _AuthService {
           AppleIDAuthorizationScopes.fullName,
         ],
         nonce: nonce,
+        // Native flow issues tokens for the bundle ID; Firebase OAuth expects the
+        // Services ID audience when OAuth code flow is configured in console.
+        webAuthenticationOptions: WebAuthenticationOptions(
+          clientId: _appleServicesId,
+          redirectUri: _appleRedirectUri,
+        ),
       );
     } on SignInWithAppleAuthorizationException catch (e) {
       if (e.code == AuthorizationErrorCode.canceled) return null;
