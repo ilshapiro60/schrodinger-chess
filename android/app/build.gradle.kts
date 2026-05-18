@@ -1,5 +1,4 @@
 import java.util.Properties
-import java.io.FileInputStream
 
 plugins {
     id("com.android.application")
@@ -11,8 +10,13 @@ plugins {
 val keystorePropertiesFile = rootProject.file("key.properties")
 val keystoreProperties = Properties()
 if (keystorePropertiesFile.exists()) {
-    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+    // PowerShell Set-Content UTF8 adds a BOM; strip it so storePassword parses correctly.
+    val text = keystorePropertiesFile.readText(Charsets.UTF_8).trimStart('\uFEFF')
+    keystoreProperties.load(text.byteInputStream(Charsets.UTF_8))
 }
+
+fun Properties.requireProperty(name: String): String =
+    getProperty(name) ?: error("key.properties is missing or invalid: $name")
 
 android {
     namespace = "com.example.schroedinger_chess"
@@ -42,10 +46,10 @@ android {
     signingConfigs {
         create("release") {
             if (keystorePropertiesFile.exists()) {
-                keyAlias = keystoreProperties["keyAlias"] as String
-                keyPassword = keystoreProperties["keyPassword"] as String
-                storePassword = keystoreProperties["storePassword"] as String
-                storeFile = rootProject.file(keystoreProperties["storeFile"] as String)
+                keyAlias = keystoreProperties.requireProperty("keyAlias")
+                keyPassword = keystoreProperties.requireProperty("keyPassword")
+                storePassword = keystoreProperties.requireProperty("storePassword")
+                storeFile = rootProject.file(keystoreProperties.requireProperty("storeFile"))
             }
         }
     }

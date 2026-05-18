@@ -47,7 +47,8 @@ keyAlias=upload
 storeFile=upload-keystore.jks
 "@
 
-Set-Content -Path key.properties -Value $props -Encoding UTF8
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+[System.IO.File]::WriteAllText((Join-Path $PSScriptRoot "key.properties"), $props, $utf8NoBom)
 
 Write-Host ""
 Write-Host "Done."
