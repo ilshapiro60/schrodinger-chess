@@ -30,6 +30,8 @@ target 'Runner' do
   use_frameworks!
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+  # google_mobile_ads podspec depends on this name, but it is only a local Flutter plugin (not on CocoaPods trunk).
+  pod 'webview_flutter_wkwebview', :path => '.symlinks/plugins/webview_flutter_wkwebview/darwin'
   target 'RunnerTests' do
     inherit! :search_paths
   end
