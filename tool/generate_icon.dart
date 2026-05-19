@@ -106,5 +106,5 @@ void main() {
 
   final png = img.encodePng(image);
   File('assets/icon.png').writeAsBytesSync(png);
-  print('✓ assets/icon.png generated (${size}x${size})');
+  print('✓ assets/icon.png generated (${size}x$size)');
 }

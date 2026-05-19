@@ -36,7 +36,7 @@ workflows:
       - name: Flutter pub get
         script: flutter pub get
       - name: CocoaPods
-        script: cd ios && pod install
+        script: cd ios && pod install --repo-update
       - name: Build IPA (CFBundleVersion from pubspec)
         # use-profiles writes /Users/builder/export_options.plist — pass it so the IPA is exported for App Store.
         script: bash scripts/flutter_build_ipa.sh --export-options-plist=/Users/builder/export_options.plist
