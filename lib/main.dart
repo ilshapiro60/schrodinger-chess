@@ -1003,6 +1003,104 @@ class _AuthService {
     await _auth.signOut();
   }
 
+  /// Permanently deletes the signed-in Firebase Auth user and Firestore profile.
+  /// Re-authenticates automatically when Firebase requires a recent login.
+  static Future<void> deleteAccount() async {
+    final user = _auth.currentUser;
+    if (user == null) {
+      throw FirebaseAuthException(
+        code: 'no-user',
+        message: 'No signed-in account to delete.',
+      );
+    }
+
+    Future<void> removeProfileDoc() async {
+      try {
+        await _db.collection('users').doc(user.uid).delete();
+      } catch (_) {
+        // Profile may already be missing; continue with Auth deletion.
+      }
+    }
+
+    Future<void> removeAuthUser() => user.delete();
+
+    try {
+      await removeProfileDoc();
+      await removeAuthUser();
+    } on FirebaseAuthException catch (e) {
+      if (e.code != 'requires-recent-login') rethrow;
+      await _reauthenticateForSensitiveAction(user);
+      await removeProfileDoc();
+      await removeAuthUser();
+    }
+
+    await _google?.signOut();
+  }
+
+  static Future<void> _reauthenticateForSensitiveAction(User user) async {
+    final providers = user.providerData.map((p) => p.providerId).toSet();
+
+    if (providers.contains('google.com')) {
+      final google = _googleSignIn();
+      final googleUser = await google.signIn();
+      if (googleUser == null) {
+        throw FirebaseAuthException(
+          code: 'reauth-canceled',
+          message: 'Sign in again to confirm account deletion.',
+        );
+      }
+      final googleAuth = await googleUser.authentication;
+      if (googleAuth.idToken == null) {
+        throw FirebaseAuthException(
+          code: 'missing-id-token',
+          message: 'Google Sign-In did not return a token. Try again.',
+        );
+      }
+      await user.reauthenticateWithCredential(
+        GoogleAuthProvider.credential(
+          accessToken: googleAuth.accessToken,
+          idToken: googleAuth.idToken,
+        ),
+      );
+      return;
+    }
+
+    if (providers.contains('apple.com') && _supportsAppleAuth) {
+      final rawNonce = _randomNonceString();
+      final nonce = _sha256ofString(rawNonce);
+      final appleCredential = await SignInWithApple.getAppleIDCredential(
+        scopes: const [
+          AppleIDAuthorizationScopes.email,
+          AppleIDAuthorizationScopes.fullName,
+        ],
+        nonce: nonce,
+      );
+      final idToken = appleCredential.identityToken;
+      if (idToken == null || idToken.isEmpty) {
+        throw FirebaseAuthException(
+          code: 'missing-apple-id-token',
+          message: 'Sign in with Apple did not return an identity token.',
+        );
+      }
+      await user.reauthenticateWithCredential(
+        AppleAuthProvider.credentialWithIDToken(
+          idToken,
+          rawNonce,
+          AppleFullPersonName(
+            givenName: appleCredential.givenName,
+            familyName: appleCredential.familyName,
+          ),
+        ),
+      );
+      return;
+    }
+
+    throw FirebaseAuthException(
+      code: 'requires-recent-login',
+      message: 'Sign out, sign in again, then retry account deletion.',
+    );
+  }
+
   static Future<void> _upsertProfile(User user) async {
     await _db.collection('users').doc(user.uid).set({
       'displayName': user.displayName ?? 'Player',
@@ -1344,8 +1442,37 @@ class _GameScreenState extends State<GameScreen> {
           Navigator.pop(sheetContext);
           await _AuthService.signOut();
         },
+        onDeleteAccount: () => _deleteAccountFromProfile(sheetContext),
       ),
     );
+  }
+
+  Future<void> _deleteAccountFromProfile(BuildContext sheetContext) async {
+    Navigator.pop(sheetContext);
+    try {
+      await _AuthService.deleteAccount();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Your account has been deleted.')),
+      );
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      final msg = e.message?.trim();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            msg != null && msg.isNotEmpty
+                ? 'Could not delete account: $msg'
+                : 'Could not delete account (${e.code}).',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not delete account: $e')),
+      );
+    }
   }
 
   void _recordOnlineResult() {
@@ -2049,6 +2176,7 @@ class _ProfileSheet extends StatefulWidget {
   final Future<void> Function() onSignInWithGoogle;
   final Future<void> Function()? onSignInWithApple;
   final VoidCallback onSignOut;
+  final Future<void> Function() onDeleteAccount;
   const _ProfileSheet({
     required this.theme,
     required this.user,
@@ -2056,6 +2184,7 @@ class _ProfileSheet extends StatefulWidget {
     required this.onSignInWithGoogle,
     this.onSignInWithApple,
     required this.onSignOut,
+    required this.onDeleteAccount,
   });
   @override
   State<_ProfileSheet> createState() => _ProfileSheetState();
@@ -2129,6 +2258,37 @@ class _ProfileSheetState extends State<_ProfileSheet> {
     setState(() => _loading = true);
     final s = await _AuthService.getStats(widget.user!.uid);
     if (mounted) setState(() { _stats = s; _loading = false; });
+  }
+
+  Future<void> _confirmDeleteAccount() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete account?'),
+        content: const Text(
+          'This permanently deletes your Schrödinger Chess account and '
+          'removes your profile and win/loss statistics from our servers. '
+          'This cannot be undone.\n\n'
+          'You may be asked to sign in once more to confirm.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text(
+              'Delete account',
+              style: TextStyle(color: Colors.redAccent),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _loading = true);
+    await widget.onDeleteAccount();
   }
 
   @override
@@ -2235,6 +2395,17 @@ class _ProfileSheetState extends State<_ProfileSheet> {
                 padding: const EdgeInsets.symmetric(vertical: 12),
               ),
               onPressed: widget.onSignOut,
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: TextButton.icon(
+              icon: const Icon(Icons.delete_forever_outlined,
+                  size: 18, color: Colors.redAccent),
+              label: const Text('Delete account',
+                  style: TextStyle(color: Colors.redAccent)),
+              onPressed: _confirmDeleteAccount,
             ),
           ),
         ],
